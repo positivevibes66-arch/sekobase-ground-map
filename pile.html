@@ -1,0 +1,1265 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no">
+<meta name="theme-color" content="#0d1117">
+<title>SEKOBASE 杭計測 - 傾斜・偏芯</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  :root {
+    --bg:#0a0a0f; --panel:#11151c; --panel2:#161b22; --line:#30363d;
+    --fg:#e6edf3; --dim:#8b949e; --accent:#f97316;
+    --ok:#3fb950; --warn:#d29922; --ng:#da3633;
+  }
+  html, body { height:100%; }
+  body {
+    font-family:'Noto Sans JP', system-ui, -apple-system, sans-serif;
+    background:var(--bg); color:var(--fg);
+    font-size:15px; line-height:1.5;
+    overscroll-behavior:none;
+    padding-bottom:env(safe-area-inset-bottom);
+  }
+
+  /* ---------- header / tabs ---------- */
+  header {
+    position:sticky; top:0; z-index:50;
+    background:linear-gradient(135deg,#0d1117,#161b22);
+    border-bottom:1px solid var(--line);
+    padding:10px 14px calc(10px + env(safe-area-inset-top)) 14px;
+    padding-top:calc(10px + env(safe-area-inset-top));
+    display:flex; align-items:center; gap:10px;
+  }
+  .mark {
+    width:30px; height:30px; border-radius:6px; flex-shrink:0;
+    background:linear-gradient(135deg,#f97316,#ef4444);
+    display:flex; align-items:center; justify-content:center;
+    font-weight:900; font-size:13px; color:#fff; letter-spacing:-1px;
+  }
+  .htitle { font-weight:900; letter-spacing:1px; font-size:15px; }
+  .hsub { font-size:11px; color:var(--dim); }
+  header a.back { margin-left:auto; color:var(--dim); font-size:12px; text-decoration:none; border:1px solid var(--line); padding:5px 9px; border-radius:6px; }
+
+  nav.tabs { display:flex; border-bottom:1px solid var(--line); background:var(--panel); position:sticky; top:0; z-index:40; }
+  nav.tabs button {
+    flex:1; padding:12px 4px; background:none; border:none; color:var(--dim);
+    font-family:inherit; font-size:13px; font-weight:700; border-bottom:2px solid transparent;
+  }
+  nav.tabs button.on { color:var(--accent); border-bottom-color:var(--accent); }
+
+  main { padding:14px; padding-bottom:60px; }
+  section { display:none; }
+  section.on { display:block; }
+
+  /* ---------- generic ---------- */
+  h2 { font-size:14px; color:var(--dim); font-weight:700; margin:18px 0 8px; letter-spacing:.5px; }
+  h2:first-child { margin-top:0; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:14px; margin-bottom:12px; }
+  .row { display:flex; gap:10px; }
+  .row > * { flex:1; min-width:0; }
+  label.f { display:block; margin-bottom:10px; }
+  label.f span { display:block; font-size:11px; color:var(--dim); margin-bottom:4px; }
+  input, select, textarea {
+    width:100%; background:var(--panel2); border:1px solid var(--line); border-radius:8px;
+    color:var(--fg); padding:11px 10px; font-family:inherit; font-size:16px;
+  }
+  input:focus, select:focus, textarea:focus { outline:none; border-color:var(--accent); }
+  textarea { font-size:13px; min-height:90px; resize:vertical; }
+  button.btn {
+    width:100%; padding:14px; border-radius:9px; border:1px solid var(--line);
+    background:var(--panel2); color:var(--fg); font-family:inherit; font-size:15px; font-weight:700;
+  }
+  button.btn.primary { background:linear-gradient(135deg,#f97316,#ef4444); border:none; color:#fff; }
+  button.btn.ghost { background:none; color:var(--dim); }
+  button.btn:disabled { opacity:.4; }
+  button.mini { padding:7px 12px; font-size:12px; border-radius:7px; border:1px solid var(--line); background:var(--panel2); color:var(--dim); font-family:inherit; font-weight:700; width:auto; }
+  .hint { font-size:12px; color:var(--dim); line-height:1.7; }
+  .hint b { color:var(--fg); }
+  .sep { height:1px; background:var(--line); margin:14px 0; }
+
+  .badge { display:inline-block; padding:2px 8px; border-radius:20px; font-size:11px; font-weight:700; }
+  .b-ok { background:rgba(63,185,80,.15); color:var(--ok); }
+  .b-warn { background:rgba(210,153,34,.15); color:var(--warn); }
+  .b-ng { background:rgba(218,54,51,.15); color:var(--ng); }
+  .b-dim { background:rgba(139,148,158,.15); color:var(--dim); }
+
+  /* ---------- pile list ---------- */
+  .pile-item { display:flex; align-items:center; gap:10px; padding:12px; border:1px solid var(--line); border-radius:9px; background:var(--panel); margin-bottom:8px; }
+  .pile-item.sel { border-color:var(--accent); background:rgba(249,115,22,.07); }
+  .pile-no { font-weight:900; font-size:16px; }
+  .pile-meta { font-size:11px; color:var(--dim); }
+  .pile-item .grow { flex:1; min-width:0; }
+
+  /* ---------- measure ---------- */
+  .steps { display:grid; grid-template-columns:repeat(2,1fr); gap:8px; }
+  .step-btn { padding:12px 8px; border-radius:9px; border:1px solid var(--line); background:var(--panel2); color:var(--fg); font-family:inherit; font-size:13px; font-weight:700; text-align:left; }
+  .step-btn small { display:block; font-size:10px; color:var(--dim); font-weight:400; margin-top:2px; }
+  .step-btn.done { border-color:var(--ok); }
+
+  .viewslot { display:flex; align-items:center; gap:10px; padding:12px; border:1px dashed var(--line); border-radius:9px; margin-bottom:8px; }
+  .viewslot.filled { border-style:solid; border-color:var(--ok); }
+  .viewslot .grow { flex:1; }
+  .vlabel { font-weight:700; }
+  .vval { font-size:12px; color:var(--dim); }
+  .thumb { width:44px; height:58px; object-fit:cover; border-radius:5px; background:#000; border:1px solid var(--line); }
+
+  .result-big { text-align:center; padding:6px 0 10px; }
+  .result-big .num { font-size:38px; font-weight:900; letter-spacing:-1px; line-height:1.1; }
+  .result-big .sub { font-size:12px; color:var(--dim); }
+
+  table.kv { width:100%; font-size:13px; border-collapse:collapse; }
+  table.kv td { padding:6px 0; border-bottom:1px solid rgba(48,54,61,.6); }
+  table.kv td:first-child { color:var(--dim); width:52%; }
+  table.kv td:last-child { text-align:right; font-weight:700; }
+  table.kv tr:last-child td { border-bottom:none; }
+
+  /* ---------- fullscreen overlays ---------- */
+  .fs { position:fixed; inset:0; z-index:200; background:#000; display:none; flex-direction:column; }
+  .fs.on { display:flex; }
+  .fs-top {
+    padding:calc(10px + env(safe-area-inset-top)) 14px 10px;
+    background:rgba(0,0,0,.75); display:flex; align-items:center; gap:12px; font-size:13px;
+  }
+  .fs-top .x { font-size:22px; line-height:1; color:#fff; background:none; border:none; padding:0 4px; }
+  .fs-stage { flex:1; position:relative; overflow:hidden; background:#000; }
+  .fs-stage video, .fs-stage canvas, .fs-stage img { position:absolute; inset:0; width:100%; height:100%; object-fit:contain; }
+  #camOverlay { position:absolute; inset:0; }
+  .fs-bot { padding:12px 14px calc(14px + env(safe-area-inset-bottom)); background:rgba(0,0,0,.85); }
+
+  .level {
+    display:flex; align-items:center; justify-content:center; gap:14px;
+    font-size:12px; margin-bottom:10px; font-variant-numeric:tabular-nums;
+  }
+  .level .pill { padding:5px 11px; border-radius:20px; border:1px solid var(--line); color:var(--dim); }
+  .level .pill.good { border-color:var(--ok); color:var(--ok); }
+  .level .pill.bad { border-color:var(--ng); color:var(--ng); }
+
+  .shutter { width:70px; height:70px; border-radius:50%; border:4px solid #fff; background:var(--accent); margin:0 auto; display:block; }
+  .shutter:disabled { background:#444; border-color:#666; }
+
+  .loupe {
+    position:absolute; width:130px; height:130px; border-radius:50%;
+    border:2px solid #fff; box-shadow:0 4px 18px rgba(0,0,0,.7);
+    pointer-events:none; display:none; overflow:hidden; z-index:10; background:#000;
+  }
+  .loupe.on { display:block; }
+  .tapmsg { text-align:center; font-size:13px; margin-bottom:10px; min-height:20px; }
+  .tapmsg b { color:var(--accent); }
+
+  .toast {
+    position:fixed; left:50%; bottom:34px; transform:translateX(-50%);
+    background:#222b36; border:1px solid var(--line); color:var(--fg);
+    padding:11px 18px; border-radius:24px; font-size:13px; z-index:500;
+    opacity:0; pointer-events:none; transition:opacity .2s; max-width:88vw; text-align:center;
+  }
+  .toast.on { opacity:1; }
+
+  .rotwarn { position:fixed; inset:0; z-index:900; background:#0a0a0f; display:none; align-items:center; justify-content:center; text-align:center; padding:30px; }
+  .rotwarn.on { display:flex; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="mark">S</div>
+  <div>
+    <div class="htitle">SEKOBASE 杭計測</div>
+    <div class="hsub">羽根付き鋼管杭 / 回転圧入 — 傾斜・偏芯</div>
+  </div>
+  <a class="back" href="index.html">地盤MAP</a>
+</header>
+
+<nav class="tabs">
+  <button data-tab="piles" class="on">杭リスト</button>
+  <button data-tab="measure">計測</button>
+  <button data-tab="records">記録</button>
+  <button data-tab="setup">設定</button>
+</nav>
+
+<main>
+
+<!-- ============ 杭リスト ============ -->
+<section id="tab-piles" class="on">
+  <div class="card">
+    <div class="row">
+      <label class="f"><span>杭番号</span><input id="p-no" placeholder="例) P-12"></label>
+      <label class="f"><span>杭径 D (mm)</span><input id="p-dia" type="number" inputmode="numeric" placeholder="267.4"></label>
+    </div>
+    <div class="row">
+      <label class="f"><span>設計杭頭深さ GL- (m)</span><input id="p-head" type="number" inputmode="decimal" step="0.01" placeholder="1.50"></label>
+      <label class="f"><span>ヤットコ</span>
+        <select id="p-yat"><option value="0">使わない</option><option value="1">使う</option></select>
+      </label>
+    </div>
+    <button class="btn primary" id="p-add">杭を追加</button>
+  </div>
+
+  <h2>登録済み <span id="p-count" class="badge b-dim">0</span></h2>
+  <div id="p-list"></div>
+
+  <div class="card">
+    <div class="hint" style="margin-bottom:8px">CSV貼り付けで一括登録（<b>杭番号,杭径mm,設計杭頭深さm,ヤットコ0/1</b> を1行1杭）</div>
+    <textarea id="p-bulk" placeholder="P-1,267.4,1.5,1&#10;P-2,267.4,1.5,1"></textarea>
+    <div style="height:8px"></div>
+    <button class="btn" id="p-bulk-go">一括登録</button>
+  </div>
+</section>
+
+<!-- ============ 計測 ============ -->
+<section id="tab-measure">
+  <div id="m-nopile" class="card hint">先に「杭リスト」で杭を登録して選択してください。</div>
+
+  <div id="m-body" style="display:none">
+    <div class="card" style="display:flex;align-items:center;gap:10px">
+      <div class="grow" style="flex:1">
+        <div class="pile-no" id="m-pileno">-</div>
+        <div class="pile-meta" id="m-pilemeta">-</div>
+      </div>
+      <button class="mini" id="m-change">変更</button>
+    </div>
+
+    <h2>計測ステップ</h2>
+    <div class="steps" id="m-steps"></div>
+
+    <div id="m-step-body" style="margin-top:14px"></div>
+  </div>
+</section>
+
+<!-- ============ 記録 ============ -->
+<section id="tab-records">
+  <div id="r-body"></div>
+  <div class="card">
+    <button class="btn" id="r-csv">CSVを書き出す</button>
+    <div style="height:8px"></div>
+    <button class="btn" id="r-json">JSONを書き出す（地盤MAP取り込み用）</button>
+  </div>
+</section>
+
+<!-- ============ 設定 ============ -->
+<section id="tab-setup">
+  <div class="card">
+    <h2 style="margin-top:0">許容値</h2>
+    <label class="f"><span>傾斜の管理値　1/n の n</span><input id="s-tilt" type="number" inputmode="numeric" value="100"></label>
+    <label class="f"><span>偏芯の上限 (mm)　※ D/4 と小さい方を採用</span><input id="s-ecc" type="number" inputmode="numeric" value="100"></label>
+    <label class="f"><span>撮影時の水平許容（ピッチ）°</span><input id="s-pitch" type="number" inputmode="decimal" step="0.1" value="1.0"></label>
+    <label class="f"><span>カメラ水平画角（概算）°</span><input id="s-hfov" type="number" inputmode="decimal" step="1" value="65"></label>
+    <button class="btn" id="s-save">保存</button>
+  </div>
+
+  <div class="card">
+    <h2 style="margin-top:0">センサー状態</h2>
+    <table class="kv"><tbody id="s-sensor"></tbody></table>
+    <div style="height:10px"></div>
+    <button class="btn" id="s-perm">センサー使用を許可（iOS）</button>
+  </div>
+
+  <div class="card">
+    <h2 style="margin-top:0">計測の考え方</h2>
+    <div class="hint">
+      <b>鉛直の基準は重力のみ。</b>方位磁石は使いません。鋼管杭のそばでも磁気の影響を受けません。<br><br>
+      <b>スマホを鉛直に構えると、世界の鉛直線は画面上でも必ず鉛直に写ります。</b>だから画面上の杭のエッジが鉛直基準線からズレた角度が、そのまま実際の傾斜（撮影方向に直交する成分）になります。<br><br>
+      <b>回転は止めなくて構いません。</b>円筒のシルエットは回転しても変わりません。首振りが疑われる場合は同じ視点で複数回撮って平均してください。<br><br>
+      <b>杭は画面の左右中央に。</b>端に写ると遠近の影響で見かけの角度がずれます（中央±15%以内なら誤差0.1°未満）。<br><br>
+      <b>杭全体を入れる必要はありません。</b>まっすぐな一部分が長く写っていれば十分です。上を向けて撮るとかえって誤差が出ます。
+    </div>
+  </div>
+
+  <div class="card">
+    <button class="btn ghost" id="s-clear">全データを消去</button>
+  </div>
+</section>
+
+</main>
+
+<!-- ============ カメラ ============ -->
+<div class="fs" id="cam">
+  <div class="fs-top">
+    <button class="x" id="cam-close">&times;</button>
+    <div><div id="cam-title" style="font-weight:700">視点A</div><div id="cam-sub" style="font-size:11px;color:#8b949e">-</div></div>
+  </div>
+  <div class="fs-stage">
+    <video id="cam-video" playsinline autoplay muted></video>
+    <canvas id="camOverlay"></canvas>
+  </div>
+  <div class="fs-bot">
+    <div class="level">
+      <div class="pill" id="lv-pitch">ピッチ -</div>
+      <div class="pill" id="lv-stab">安定 -</div>
+    </div>
+    <button class="shutter" id="cam-shot" disabled></button>
+  </div>
+</div>
+
+<!-- ============ エッジ指定 ============ -->
+<div class="fs" id="mark">
+  <div class="fs-top">
+    <button class="x" id="mark-close">&times;</button>
+    <div><div id="mark-title" style="font-weight:700">エッジを指定</div><div id="mark-sub" style="font-size:11px;color:#8b949e">-</div></div>
+    <button class="mini" id="mark-undo" style="margin-left:auto">1つ戻す</button>
+  </div>
+  <div class="fs-stage" id="mark-stage">
+    <canvas id="markCanvas"></canvas>
+    <div class="loupe" id="loupe"><canvas id="loupeCanvas" width="130" height="130"></canvas></div>
+  </div>
+  <div class="fs-bot">
+    <div class="tapmsg" id="mark-msg"></div>
+    <button class="btn primary" id="mark-ok" disabled>この計測を確定</button>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+<div class="rotwarn" id="rotwarn"><div><div style="font-size:40px;margin-bottom:14px">📱</div><b>縦持ちでご使用ください</b><div class="hint" style="margin-top:8px">画面を回転させると計測の基準がずれます</div></div></div>
+
+<script>
+'use strict';
+
+/* =========================================================
+   SEKOBASE 杭計測 — 傾斜・偏芯
+   羽根付き鋼管杭 / 回転圧入 を想定
+
+   原理:
+     スマホを鉛直に構える（光軸を水平にする）と画像面が鉛直になり、
+     世界の鉛直線は画面上でも鉛直線に写る。よって画面上で
+     「重力から求めた真の鉛直方向」と「杭のエッジ方向」がなす角が
+     そのまま傾斜（撮影方向に直交する成分）になる。
+     直交する2視点から測れば傾斜ベクトルが決まる。
+     方位磁石は一切使わない（鋼管の磁気影響を受けない）。
+   ========================================================= */
+
+const D2R = Math.PI / 180, R2D = 180 / Math.PI;
+const $  = s => document.querySelector(s);
+const $$ = s => Array.from(document.querySelectorAll(s));
+const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+const fmt = (v, d = 2) => (v === null || v === undefined || !isFinite(v)) ? '-' : v.toFixed(d);
+
+/* ---------------- ステップ定義 ---------------- */
+const STEPS = [
+  { key:'set',      name:'建込み',   desc:'セット直後の初期傾斜' },
+  { key:'mid',      name:'圧入中',   desc:'トレンド監視（任意）' },
+  { key:'preweld',  name:'溶接前',   desc:'下杭の最終傾斜' },
+  { key:'postweld', name:'溶接後',   desc:'継手の折れ角を算出' },
+  { key:'final',    name:'最終',     desc:'消える直前＋偏芯実測' },
+];
+const stepName = k => (STEPS.find(s => s.key === k) || {}).name || k;
+
+/* ---------------- ストレージ ---------------- */
+const LS_KEY = 'sekobase_pile_v1';
+let DB = {
+  piles: [],
+  meas: [],
+  settings: { tiltN: 100, eccMax: 100, pitchTol: 1.0, hfov: 65 },
+  selPile: null,
+};
+function saveDB() { try { localStorage.setItem(LS_KEY, JSON.stringify(DB)); } catch (e) { toast('保存に失敗しました'); } }
+function loadDB() {
+  try {
+    const s = localStorage.getItem(LS_KEY);
+    if (s) {
+      const o = JSON.parse(s);
+      DB.piles = o.piles || []; DB.meas = o.meas || [];
+      DB.selPile = o.selPile || null;
+      Object.assign(DB.settings, o.settings || {});
+    }
+  } catch (e) { /* 破損時は初期状態のまま */ }
+}
+
+/* ---------------- 画像は IndexedDB（localStorage を圧迫しない） ---------------- */
+const ImgStore = (() => {
+  let dbp = null;
+  function open() {
+    if (dbp) return dbp;
+    dbp = new Promise((res, rej) => {
+      const r = indexedDB.open('sekobase_pile_img', 1);
+      r.onupgradeneeded = () => r.result.createObjectStore('img');
+      r.onsuccess = () => res(r.result);
+      r.onerror = () => rej(r.error);
+    }).catch(() => null);
+    return dbp;
+  }
+  async function tx(mode) {
+    const d = await open(); if (!d) return null;
+    return d.transaction('img', mode).objectStore('img');
+  }
+  return {
+    async put(key, dataUrl) { const s = await tx('readwrite'); if (s) s.put(dataUrl, key); },
+    async get(key) {
+      const s = await tx('readonly'); if (!s) return null;
+      return new Promise(res => { const r = s.get(key); r.onsuccess = () => res(r.result || null); r.onerror = () => res(null); });
+    },
+    async del(key) { const s = await tx('readwrite'); if (s) s.delete(key); },
+  };
+})();
+
+/* ---------------- トースト ---------------- */
+let toastT = null;
+function toast(msg) {
+  const el = $('#toast'); el.textContent = msg; el.classList.add('on');
+  clearTimeout(toastT); toastT = setTimeout(() => el.classList.remove('on'), 2200);
+}
+
+/* =========================================================
+   重力センサー
+   DeviceOrientationEvent の beta / gamma から
+   デバイス座標系での重力単位ベクトルを求める。
+   （alpha には依存しない = 方位磁石が不要）
+
+     gx =  cos(beta) * sin(gamma)
+     gy = -sin(beta)
+     gz = -cos(beta) * cos(gamma)
+
+   デバイス座標: x=画面右, y=画面上, z=画面手前
+   背面カメラの光軸は -z。よって画像面が鉛直 ⇔ gz = 0。
+   ========================================================= */
+const Sensor = {
+  ok: false, gx: 0, gy: -1, gz: 0,
+  gO: null,          // deviceorientation 由来（符号が一意に決まる）
+  gM: null,          // devicemotion 由来（高分解能・ジンバルロックなし）
+  signM: 0,          // devicemotion の符号（実装により +/- が逆転するため実測で決める）
+  buf: [],           // 直近の重力ベクトル（平均化・安定度評価）
+  hasMotion: false,
+
+  /* beta / gamma からデバイス座標系の重力単位ベクトルを求める。
+     R = Rz(alpha)Rx(beta)Ry(gamma) の第3行を反転したもの。alpha に依存しない。*/
+  fromOrientation(beta, gamma) {
+    const b = beta * D2R, g = gamma * D2R;
+    return { x: Math.cos(b) * Math.sin(g), y: -Math.sin(b), z: -Math.cos(b) * Math.cos(g) };
+  },
+
+  push(g) {
+    const n = Math.hypot(g.x, g.y, g.z) || 1;
+    const v = { x: g.x / n, y: g.y / n, z: g.z / n, t: performance.now() };
+    this.buf.push(v);
+    while (this.buf.length && v.t - this.buf[0].t > 700) this.buf.shift();
+    // 直近 0.7 秒の平均を採用（振動・手ぶれを平滑化）
+    let sx = 0, sy = 0, sz = 0;
+    this.buf.forEach(o => { sx += o.x; sy += o.y; sz += o.z; });
+    const m = Math.hypot(sx, sy, sz) || 1;
+    this.gx = sx / m; this.gy = sy / m; this.gz = sz / m;
+    this.ok = true;
+  },
+
+  onOrientation(e) {
+    if (e.beta === null || e.gamma === null) return;
+    this.gO = this.fromOrientation(e.beta, e.gamma);
+    // devicemotion の符号が未確定なら、向きセンサーと突き合わせて決める
+    if (this.hasMotion && this.signM === 0 && this.gM) {
+      const d = this.gO.x * this.gM.x + this.gO.y * this.gM.y + this.gO.z * this.gM.z;
+      if (Math.abs(d) > 0.85) this.signM = d > 0 ? 1 : -1;
+    }
+    if (!this.hasMotion || this.signM === 0) this.push(this.gO);
+  },
+
+  onMotion(e) {
+    const a = e.accelerationIncludingGravity;
+    if (!a || a.x === null || a.y === null) return;
+    this.hasMotion = true;
+    const mag = Math.hypot(a.x, a.y, a.z || 0);
+    // 静止時のみ採用（打撃・振動による線形加速度を除く）
+    if (mag < 9.0 || mag > 10.6) return;
+    this.gM = { x: a.x / mag, y: a.y / mag, z: (a.z || 0) / mag };
+    if (this.signM !== 0) {
+      this.push({ x: this.gM.x * this.signM, y: this.gM.y * this.signM, z: this.gM.z * this.signM });
+    }
+  },
+
+  // 光軸の水平からの傾き（＋が下向き）。画像面が鉛直 ⇔ これが 0
+  get pitchDeg() { return Math.asin(clamp(-this.gz, -1, 1)) * R2D; },
+  // 画面の鉛直軸と真の鉛直とのなす角
+  get rollDeg() { return Math.atan2(this.gx, -this.gy) * R2D; },
+  // 直近のばらつき（1σ, 度）— 手ぶれ・振動の指標
+  get stabilityDeg() {
+    if (this.buf.length < 6) return null;
+    const r = this.buf.map(o => Math.atan2(o.x, -o.y) * R2D);
+    const m = r.reduce((a, b) => a + b, 0) / r.length;
+    return Math.sqrt(r.reduce((a, b) => a + (b - m) * (b - m), 0) / r.length);
+  },
+  get source() { return this.signM !== 0 ? 'accel+orientation' : (this.ok ? 'orientation' : '-'); },
+
+  snapshot() {
+    return { gx: this.gx, gy: this.gy, gz: this.gz,
+             pitch: this.pitchDeg, roll: this.rollDeg,
+             stab: this.stabilityDeg, src: this.source };
+  },
+
+  start() {
+    window.addEventListener('deviceorientation', e => this.onOrientation(e), true);
+    window.addEventListener('devicemotion', e => this.onMotion(e), true);
+  },
+  async requestPermission() {
+    const DO = window.DeviceOrientationEvent, DM = window.DeviceMotionEvent;
+    try {
+      if (DO && typeof DO.requestPermission === 'function') {
+        if (await DO.requestPermission() !== 'granted') { toast('センサーが許可されませんでした'); return false; }
+      }
+      if (DM && typeof DM.requestPermission === 'function') await DM.requestPermission();
+    } catch (e) { toast('センサー許可の要求に失敗しました'); return false; }
+    this.start();
+    return true;
+  },
+};
+
+/* =========================================================
+   計測の数学
+   ========================================================= */
+
+/* 画像内の線分（キャンバス座標, y下向き）が真の鉛直となす符号付き角[deg]
+   ＋ = 杭頭が画面右へ倒れている                                     */
+function angleFromTrueVertical(p1, p2, grav) {
+  let vx = p2.x - p1.x, vy = -(p2.y - p1.y);       // y上向きの数学座標へ
+  let ux = -grav.gx, uy = -grav.gy;                 // 画像内の「真の上」方向
+  const un = Math.hypot(ux, uy) || 1; ux /= un; uy /= un;
+  if (vx * ux + vy * uy < 0) { vx = -vx; vy = -vy; } // 上向きに揃える
+  const vn = Math.hypot(vx, vy) || 1; vx /= vn; vy /= vn;
+  const cross = ux * vy - uy * vx, dot = ux * vx + uy * vy;
+  return -Math.atan2(cross, dot) * R2D;
+}
+
+/* 4点（左エッジ2点 + 右エッジ2点）から1視点分の計測値を作る */
+function buildView(pts, grav, imgW) {
+  const aL = angleFromTrueVertical(pts[0], pts[1], grav);
+  const aR = angleFromTrueVertical(pts[2], pts[3], grav);
+  const angle = (aL + aR) / 2;
+
+  // 杭の左右中心が画面中央からどれだけ外れているか（遠近誤差の指標）
+  const midX = (pts[0].x + pts[1].x + pts[2].x + pts[3].x) / 4;
+  const offset = (midX - imgW / 2) / imgW;          // -0.5 .. +0.5
+
+  // 遠近による見かけ角の最大誤差[deg]
+  //   誤差 ≈ (x/f) * (視線方向の傾き成分) 、f = (W/2)/tan(hfov/2)
+  const f = (imgW / 2) / Math.tan((DB.settings.hfov * D2R) / 2);
+  const perspErr = Math.abs((offset * imgW) / f) * (1 / DB.settings.tiltN) * R2D;
+
+  return {
+    angle,                                  // 傾斜角[deg]（＋=画面右へ倒れ）
+    tan: Math.tan(angle * D2R),             // 勾配（＝ 1/n の 1/n）
+    edgeDiff: Math.abs(aL - aR),            // 左右エッジの食い違い（タップ品質）
+    offset, perspErr,
+    pitch: grav.pitch, roll: grav.roll, stab: grav.stab,
+    pts, at: Date.now(),
+  };
+}
+
+/* 2視点から傾斜ベクトルを合成 */
+function composeTilt(vA, vB) {
+  if (!vA || !vB) return null;
+  const tA = vA.tan, tB = vB.tan;
+  const mag = Math.hypot(tA, tB);
+  return {
+    tA, tB, mag,
+    ratio: mag > 1e-9 ? 1 / mag : Infinity,   // 1/n の n
+    deg: Math.atan(mag) * R2D,
+  };
+}
+
+/* 継手の折れ角（溶接前後の傾斜ベクトルの差） */
+function jointAngle(pre, post) {
+  if (!pre || !post) return null;
+  const dA = post.tA - pre.tA, dB = post.tB - pre.tB;
+  const mag = Math.hypot(dA, dB);
+  return { dA, dB, mag, ratio: mag > 1e-9 ? 1 / mag : Infinity, deg: Math.atan(mag) * R2D };
+}
+
+/* 設計杭頭レベルへの外挿
+   計測位置(高さ z_meas)から設計杭頭(z_head)まで、杭が直線であると仮定して延長する。
+   杭軸は上へ行くほど +t だけ水平にずれるので、下がる分は符号がマイナスになる。
+       e_head = e_meas - t * Δh          Δh = z_meas - z_head  ( >0 )
+   Δh = 偏芯計測高さ(GL+ m) + 設計杭頭深さ(GL- m)                                  */
+function extrapolate(ecc, tilt, dh_m) {
+  if (!tilt || !ecc) return null;
+  const dh_mm = dh_m * 1000;
+  const hA = ecc.eA - tilt.tA * dh_mm;
+  const hB = ecc.eB - tilt.tB * dh_mm;
+  return { hA, hB, mag: Math.hypot(hA, hB), dh_m };
+}
+
+/* 偏芯の許容値 = min(D/4, 上限) */
+function eccAllow(diaMm) {
+  const a = (diaMm || 0) / 4;
+  return Math.min(a > 0 ? a : Infinity, DB.settings.eccMax);
+}
+
+/* =========================================================
+   データ操作
+   ========================================================= */
+const getPile = id => DB.piles.find(p => p.id === id) || null;
+const getMeas = (pileId, step) => DB.meas.find(m => m.pileId === pileId && m.step === step) || null;
+
+/* 表示しただけの空レコードを保存しないよう、実データが入るまで DB には積まない */
+function ensureMeas(pileId, step) {
+  return getMeas(pileId, step) ||
+         { id: uid(), pileId, step, A: null, B: null, ecc: null, at: Date.now() };
+}
+function commitMeas(m) {
+  if (!DB.meas.includes(m)) DB.meas.push(m);
+  m.at = Date.now();
+  saveDB();
+}
+function measTilt(m) { return m ? composeTilt(m.A, m.B) : null; }
+
+function pileSummary(pileId) {
+  const p = getPile(pileId);
+  if (!p) return null;
+  const byStep = {};
+  STEPS.forEach(s => { const m = getMeas(pileId, s.key); if (m) byStep[s.key] = { meas: m, tilt: measTilt(m) }; });
+  const fin = byStep.final;
+  const joint = jointAngle(byStep.preweld && byStep.preweld.tilt, byStep.postweld && byStep.postweld.tilt);
+  let head = null;
+  if (fin && fin.tilt && fin.meas.ecc) {
+    const dh = (fin.meas.ecc.measH || 0) + (p.headDepth || 0);
+    head = extrapolate(fin.meas.ecc, fin.tilt, dh);
+  }
+  return { pile: p, byStep, joint, head, allow: eccAllow(p.dia) };
+}
+
+/* =========================================================
+   UI: タブ
+   ========================================================= */
+$$('nav.tabs button').forEach(b => b.addEventListener('click', () => {
+  $$('nav.tabs button').forEach(x => x.classList.remove('on'));
+  b.classList.add('on');
+  $$('main section').forEach(s => s.classList.remove('on'));
+  $('#tab-' + b.dataset.tab).classList.add('on');
+  if (b.dataset.tab === 'records') renderRecords();
+  if (b.dataset.tab === 'measure') renderMeasure();
+  window.scrollTo(0, 0);
+}));
+function goTab(name) { const b = $$('nav.tabs button').find(x => x.dataset.tab === name); if (b) b.click(); }
+
+/* =========================================================
+   UI: 杭リスト
+   ========================================================= */
+function addPile(no, dia, headDepth, yat) {
+  if (!no) { toast('杭番号を入力してください'); return null; }
+  if (DB.piles.some(p => p.no === no)) { toast('同じ杭番号があります: ' + no); return null; }
+  const p = { id: uid(), no, dia: dia || 0, headDepth: headDepth || 0, yat: !!yat, at: Date.now() };
+  DB.piles.push(p); saveDB(); return p;
+}
+
+$('#p-add').addEventListener('click', () => {
+  const p = addPile($('#p-no').value.trim(), parseFloat($('#p-dia').value),
+                    parseFloat($('#p-head').value), $('#p-yat').value === '1');
+  if (!p) return;
+  $('#p-no').value = ''; renderPiles(); toast(p.no + ' を追加しました');
+});
+
+$('#p-bulk-go').addEventListener('click', () => {
+  const lines = $('#p-bulk').value.split('\n').map(s => s.trim()).filter(Boolean);
+  let n = 0;
+  lines.forEach(l => {
+    const c = l.split(',').map(s => s.trim());
+    if (addPile(c[0], parseFloat(c[1]), parseFloat(c[2]), c[3] === '1')) n++;
+  });
+  $('#p-bulk').value = ''; renderPiles(); toast(n + '本を登録しました');
+});
+
+function renderPiles() {
+  const list = $('#p-list');
+  $('#p-count').textContent = DB.piles.length;
+  if (!DB.piles.length) { list.innerHTML = '<div class="card hint">まだ杭が登録されていません。</div>'; return; }
+  list.innerHTML = '';
+  DB.piles.forEach(p => {
+    const s = pileSummary(p.id);
+    const done = Object.keys(s.byStep).length;
+    const el = document.createElement('div');
+    el.className = 'pile-item' + (DB.selPile === p.id ? ' sel' : '');
+    el.innerHTML =
+      '<div class="grow">' +
+        '<div class="pile-no">' + esc(p.no) + '</div>' +
+        '<div class="pile-meta">φ' + (p.dia || '-') + ' / 設計杭頭 GL-' + fmt(p.headDepth, 2) + 'm' +
+          (p.yat ? ' / ヤットコ' : '') + ' / 計測 ' + done + '件</div>' +
+      '</div>' +
+      '<button class="mini" data-act="sel">計測</button>' +
+      '<button class="mini" data-act="del">削除</button>';
+    el.querySelector('[data-act="sel"]').addEventListener('click', () => {
+      DB.selPile = p.id; saveDB(); renderPiles(); goTab('measure');
+    });
+    el.querySelector('[data-act="del"]').addEventListener('click', () => {
+      if (!confirm(p.no + ' と、その計測記録を削除します。よろしいですか？')) return;
+      DB.meas.filter(m => m.pileId === p.id).forEach(m => {
+        ['A', 'B'].forEach(k => { if (m[k] && m[k].imgKey) ImgStore.del(m[k].imgKey); });
+      });
+      DB.meas = DB.meas.filter(m => m.pileId !== p.id);
+      DB.piles = DB.piles.filter(x => x.id !== p.id);
+      if (DB.selPile === p.id) DB.selPile = null;
+      saveDB(); renderPiles(); toast('削除しました');
+    });
+    list.appendChild(el);
+  });
+}
+function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c])); }
+
+/* =========================================================
+   UI: 計測
+   ========================================================= */
+let curStep = 'set';
+
+function renderMeasure() {
+  const p = getPile(DB.selPile);
+  $('#m-nopile').style.display = p ? 'none' : 'block';
+  $('#m-body').style.display = p ? 'block' : 'none';
+  if (!p) return;
+
+  $('#m-pileno').textContent = p.no;
+  $('#m-pilemeta').textContent =
+    'φ' + (p.dia || '-') + ' / 設計杭頭 GL-' + fmt(p.headDepth, 2) + 'm' +
+    (p.yat ? ' / ヤットコ使用' : ' / ヤットコなし') +
+    ' / 偏芯許容 ' + fmt(eccAllow(p.dia), 1) + 'mm';
+
+  const sb = $('#m-steps'); sb.innerHTML = '';
+  STEPS.forEach(s => {
+    const m = getMeas(p.id, s.key);
+    const t = measTilt(m);
+    const b = document.createElement('button');
+    b.className = 'step-btn' + (t ? ' done' : '') + (curStep === s.key ? '' : '');
+    if (curStep === s.key) b.style.borderColor = 'var(--accent)';
+    b.innerHTML = '<div>' + s.name + (t ? ' <span class="badge ' + tiltBadge(t) + '">1/' + fmt(t.ratio, 0) + '</span>' : '') +
+                  '</div><small>' + s.desc + '</small>';
+    b.addEventListener('click', () => { curStep = s.key; renderMeasure(); });
+    sb.appendChild(b);
+  });
+
+  renderStepBody(p);
+}
+
+function tiltBadge(t) {
+  if (!t) return 'b-dim';
+  const lim = 1 / DB.settings.tiltN;
+  if (t.mag > lim) return 'b-ng';
+  if (t.mag > lim * 0.7) return 'b-warn';
+  return 'b-ok';
+}
+
+function renderStepBody(p) {
+  const m = ensureMeas(p.id, curStep);
+  const t = measTilt(m);
+  const box = $('#m-step-body');
+  box.innerHTML = '';
+
+  // --- 2視点 ---
+  const card = document.createElement('div');
+  card.className = 'card';
+  card.innerHTML = '<h2 style="margin-top:0">' + stepName(curStep) + ' — 傾斜（直交2視点）</h2>' +
+    '<div class="hint" style="margin-bottom:10px">視点Bは<b>視点Aから90°回った位置</b>から撮ってください。回転は止めなくて構いません。</div>';
+  ['A', 'B'].forEach(k => {
+    const v = m[k];
+    const row = document.createElement('div');
+    row.className = 'viewslot' + (v ? ' filled' : '');
+    row.innerHTML =
+      '<img class="thumb" data-img="' + (v && v.imgKey ? v.imgKey : '') + '" alt="">' +
+      '<div class="grow">' +
+        '<div class="vlabel">視点' + k + '</div>' +
+        '<div class="vval">' + (v
+          ? (v.angle >= 0 ? '右へ ' : '左へ ') + fmt(Math.abs(v.angle), 3) + '° ／ 1/' +
+            (Math.abs(v.tan) > 1e-9 ? fmt(1 / Math.abs(v.tan), 0) : '∞')
+          : '未計測') + '</div>' +
+      '</div>' +
+      '<button class="mini">' + (v ? '撮り直す' : '撮影') + '</button>';
+    row.querySelector('button').addEventListener('click', () => startCapture(p, curStep, k));
+    card.appendChild(row);
+    if (v && v.imgKey) {
+      const img = row.querySelector('img');
+      ImgStore.get(v.imgKey).then(d => { if (d) img.src = d; });
+    }
+  });
+  box.appendChild(card);
+
+  // --- 傾斜結果 ---
+  if (t) {
+    const r = document.createElement('div');
+    r.className = 'card';
+    const bad = t.mag > 1 / DB.settings.tiltN;
+    const col = bad ? 'var(--ng)' : (t.mag > 0.7 / DB.settings.tiltN ? 'var(--warn)' : 'var(--ok)');
+    r.innerHTML =
+      '<div class="result-big"><div class="num" style="color:' + col + '">1/' + fmt(t.ratio, 0) + '</div>' +
+      '<div class="sub">合成傾斜　' + fmt(t.deg, 3) + '°　（管理値 1/' + DB.settings.tiltN + '）</div></div>' +
+      '<table class="kv"><tbody>' +
+      '<tr><td>視点A成分</td><td>' + fmtSigned(m.A.tan) + '</td></tr>' +
+      '<tr><td>視点B成分</td><td>' + fmtSigned(m.B.tan) + '</td></tr>' +
+      '<tr><td>撮影ピッチ (A/B)</td><td>' + fmt(m.A.pitch, 2) + '° / ' + fmt(m.B.pitch, 2) + '°</td></tr>' +
+      '<tr><td>左右エッジ差 (A/B)</td><td>' + fmt(m.A.edgeDiff, 3) + '° / ' + fmt(m.B.edgeDiff, 3) + '°</td></tr>' +
+      '<tr><td>中央からのズレ (A/B)</td><td>' + fmt(m.A.offset * 100, 1) + '% / ' + fmt(m.B.offset * 100, 1) + '%</td></tr>' +
+      '<tr><td>遠近による誤差上限</td><td>±' + fmt(Math.max(m.A.perspErr, m.B.perspErr), 3) + '°</td></tr>' +
+      '</tbody></table>';
+    box.appendChild(r);
+  }
+
+  // --- 継手折れ角 ---
+  if (curStep === 'postweld') {
+    const pre = measTilt(getMeas(p.id, 'preweld'));
+    const j = jointAngle(pre, t);
+    const c = document.createElement('div'); c.className = 'card';
+    c.innerHTML = '<h2 style="margin-top:0">継手の折れ角</h2>' + (j
+      ? '<div class="result-big"><div class="num" style="font-size:30px">1/' + fmt(j.ratio, 0) + '</div>' +
+        '<div class="sub">' + fmt(j.deg, 3) + '°　＝ 溶接後 − 溶接前（ベクトル差）</div></div>' +
+        '<div class="hint">下杭が真っ直ぐでも継手で折れれば先端は大きくずれます。段数分だけ累積します。</div>'
+      : '<div class="hint">溶接前・溶接後の両方を計測すると、継手の折れ角が算出されます。</div>');
+    box.appendChild(c);
+  }
+
+  // --- 最終ステップ: 偏芯 ---
+  if (curStep === 'final') box.appendChild(buildEccCard(p, m, t));
+}
+function fmtSigned(t) {
+  if (!isFinite(t)) return '-';
+  const s = t >= 0 ? '右' : '左';
+  return s + ' 1/' + (Math.abs(t) > 1e-9 ? fmt(1 / Math.abs(t), 0) : '∞');
+}
+
+function buildEccCard(p, m, tilt) {
+  const c = document.createElement('div'); c.className = 'card';
+  const e = m.ecc || { eA: '', eB: '', measH: '' };
+  c.innerHTML =
+    '<h2 style="margin-top:0">偏芯の実測</h2>' +
+    '<div class="hint" style="margin-bottom:12px">逃げ杭・通り芯から実測した設計芯からのズレを、<b>傾斜と同じ2方向</b>で入力してください。' +
+    '符号は<b>その視点から見て右が＋</b>です。</div>' +
+    '<div class="row">' +
+      '<label class="f"><span>視点A方向のズレ (mm)</span><input id="e-a" type="number" inputmode="decimal" value="' + e.eA + '"></label>' +
+      '<label class="f"><span>視点B方向のズレ (mm)</span><input id="e-b" type="number" inputmode="decimal" value="' + e.eB + '"></label>' +
+    '</div>' +
+    '<label class="f"><span>偏芯を測った高さ　GL+ (m)　※ GL以下なら負の値</span>' +
+      '<input id="e-h" type="number" inputmode="decimal" step="0.01" value="' + e.measH + '"></label>' +
+    '<button class="btn" id="e-save">保存して判定</button>' +
+    '<div id="e-out" style="margin-top:14px"></div>';
+
+  setTimeout(() => {
+    const out = $('#e-out');
+    const render = () => {
+      if (!m.ecc) { out.innerHTML = '<div class="hint">実測値を入力すると、設計杭頭レベルへ外挿して判定します。</div>'; return; }
+      if (!tilt) { out.innerHTML = '<div class="hint">傾斜（視点A・B）が未計測のため外挿できません。</div>'; return; }
+      const dh = (m.ecc.measH || 0) + (p.headDepth || 0);
+      const h = extrapolate(m.ecc, tilt, dh);
+      const allow = eccAllow(p.dia);
+      const ng = h.mag > allow;
+      const col = ng ? 'var(--ng)' : (h.mag > allow * 0.7 ? 'var(--warn)' : 'var(--ok)');
+      const measMag = Math.hypot(m.ecc.eA, m.ecc.eB);
+      out.innerHTML =
+        '<div class="result-big"><div class="num" style="color:' + col + '">' + fmt(h.mag, 0) + '<span style="font-size:18px"> mm</span></div>' +
+        '<div class="sub">設計杭頭レベルでの合成偏芯　（許容 ' + fmt(allow, 0) + 'mm）</div></div>' +
+        '<table class="kv"><tbody>' +
+        '<tr><td>実測位置での合成偏芯</td><td>' + fmt(measMag, 0) + ' mm</td></tr>' +
+        '<tr><td>外挿距離 Δh</td><td>' + fmt(dh, 2) + ' m</td></tr>' +
+        '<tr><td>傾斜による補正量</td><td>' + fmt(Math.hypot(tilt.tA, tilt.tB) * dh * 1000, 0) + ' mm</td></tr>' +
+        '<tr><td>杭頭 視点A成分</td><td>' + fmt(h.hA, 0) + ' mm</td></tr>' +
+        '<tr><td>杭頭 視点B成分</td><td>' + fmt(h.hB, 0) + ' mm</td></tr>' +
+        '<tr><td>許容値 min(D/4, ' + DB.settings.eccMax + ')</td><td>' + fmt(allow, 0) + ' mm</td></tr>' +
+        '<tr><td>判定</td><td><span class="badge ' + (ng ? 'b-ng' : 'b-ok') + '">' + (ng ? '要協議' : '合格') + '</span></td></tr>' +
+        '</tbody></table>' +
+        '<div class="hint" style="margin-top:12px">※ 外挿は<b>杭が直線であること</b>を前提としています。地中での偏向（玉石・支持層の傾斜など）は地上からは判定できません。' +
+        (p.yat ? '<br>※ ヤットコ計測値は<b>ヤットコと杭が同軸</b>という前提で扱っています。' : '') + '</div>';
+    };
+    $('#e-save').addEventListener('click', () => {
+      const eA = parseFloat($('#e-a').value), eB = parseFloat($('#e-b').value), measH = parseFloat($('#e-h').value);
+      if (!isFinite(eA) || !isFinite(eB)) { toast('視点A・Bのズレを入力してください'); return; }
+      if (!isFinite(measH)) { toast('計測した高さを入力してください'); return; }
+      m.ecc = { eA, eB, measH, at: Date.now() };
+      commitMeas(m); render(); toast('保存しました');
+    });
+    render();
+  }, 0);
+  return c;
+}
+
+$('#m-change').addEventListener('click', () => goTab('piles'));
+
+/* =========================================================
+   カメラ撮影
+   ========================================================= */
+let camStream = null, camCtx = null, camRAF = 0;
+let capTarget = null;      // { pile, step, view }
+
+async function startCapture(pile, step, view) {
+  if (!Sensor.ok) {
+    const ok = await Sensor.requestPermission();
+    if (!ok) return;
+    await new Promise(r => setTimeout(r, 400));
+    if (!Sensor.ok) { toast('傾斜センサーが取得できません。HTTPSで開いているか確認してください'); return; }
+  }
+  capTarget = { pile, step, view };
+  $('#cam-title').textContent = '視点' + view + '（' + stepName(step) + '）';
+  $('#cam-sub').textContent = pile.no + ' — スマホを鉛直に構え、杭を画面中央に';
+
+  try {
+    camStream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } },
+      audio: false,
+    });
+  } catch (e) {
+    toast('カメラを起動できません（HTTPS と権限を確認してください）'); return;
+  }
+  const v = $('#cam-video');
+  v.srcObject = camStream;
+  await v.play().catch(() => {});
+  $('#cam').classList.add('on');
+  const cv = $('#camOverlay');
+  camCtx = cv.getContext('2d');
+  loopCam();
+}
+
+function stopCapture() {
+  cancelAnimationFrame(camRAF);
+  if (camStream) { camStream.getTracks().forEach(t => t.stop()); camStream = null; }
+  $('#cam').classList.remove('on');
+}
+$('#cam-close').addEventListener('click', stopCapture);
+
+function loopCam() {
+  camRAF = requestAnimationFrame(loopCam);
+  const cv = $('#camOverlay'), st = $('#cam').querySelector('.fs-stage');
+  const w = st.clientWidth, h = st.clientHeight;
+  if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; }
+  const c = camCtx;
+  c.clearRect(0, 0, w, h);
+
+  const pitch = Sensor.pitchDeg, roll = Sensor.rollDeg, stab = Sensor.stabilityDeg;
+  const tol = DB.settings.pitchTol;
+  const levelOK = Math.abs(pitch) <= tol;
+  const stabOK = stab === null || stab <= 0.35;
+
+  // 真の鉛直線（重力から）
+  let ux = -Sensor.gx, uy = -Sensor.gy;
+  const un = Math.hypot(ux, uy) || 1; ux /= un; uy /= un;
+  const dx = ux, dy = -uy;                       // キャンバス座標（y下向き）へ
+  const cx = w / 2, cy = h / 2, L = Math.max(w, h);
+  c.strokeStyle = levelOK ? 'rgba(63,185,80,.9)' : 'rgba(218,54,51,.9)';
+  c.lineWidth = 2; c.setLineDash([10, 8]);
+  c.beginPath(); c.moveTo(cx - dx * L, cy - dy * L); c.lineTo(cx + dx * L, cy + dy * L); c.stroke();
+  c.setLineDash([]);
+
+  // 中央帯（±15%）
+  c.strokeStyle = 'rgba(255,255,255,.25)'; c.lineWidth = 1;
+  [-0.15, 0.15].forEach(o => { const x = cx + o * w; c.beginPath(); c.moveTo(x, 0); c.lineTo(x, h); c.stroke(); });
+
+  // ピッチのズレを水平線で可視化
+  c.strokeStyle = levelOK ? 'rgba(63,185,80,.55)' : 'rgba(218,54,51,.75)';
+  c.lineWidth = 3;
+  const py = cy + clamp(pitch / (tol * 6), -1, 1) * (h * 0.32);
+  c.beginPath(); c.moveTo(w * 0.18, py); c.lineTo(w * 0.82, py); c.stroke();
+  c.strokeStyle = 'rgba(255,255,255,.5)'; c.lineWidth = 1;
+  c.beginPath(); c.moveTo(w * 0.10, cy); c.lineTo(w * 0.90, cy); c.stroke();
+
+  const lp = $('#lv-pitch'), ls = $('#lv-stab');
+  lp.textContent = 'ピッチ ' + fmt(pitch, 2) + '°';
+  lp.className = 'pill ' + (levelOK ? 'good' : 'bad');
+  ls.textContent = '安定 ' + (stab === null ? '-' : fmt(stab, 2) + '°');
+  ls.className = 'pill ' + (stabOK ? 'good' : 'bad');
+  $('#cam-shot').disabled = !(levelOK && stabOK);
+}
+
+$('#cam-shot').addEventListener('click', () => {
+  const v = $('#cam-video');
+  if (!v.videoWidth) { toast('カメラの準備中です'); return; }
+  const grav = Sensor.snapshot();
+  const cv = document.createElement('canvas');
+  cv.width = v.videoWidth; cv.height = v.videoHeight;
+  cv.getContext('2d').drawImage(v, 0, 0);
+  stopCapture();
+  openMark(cv, grav);
+});
+
+/* =========================================================
+   エッジ指定（ルーペ付き）
+   ========================================================= */
+let markImg = null, markGrav = null, markPts = [], markScale = 1, markOff = { x: 0, y: 0 };
+const MARK_GUIDE = [
+  '<b>左</b>エッジの<b>上</b>を長押しで合わせる',
+  '<b>左</b>エッジの<b>下</b>（できるだけ離して）',
+  '<b>右</b>エッジの<b>上</b>',
+  '<b>右</b>エッジの<b>下</b>（できるだけ離して）',
+];
+
+function openMark(canvas, grav) {
+  markImg = canvas; markGrav = grav; markPts = [];
+  $('#mark-title').textContent = '視点' + capTarget.view + ' — エッジを指定';
+  $('#mark-sub').textContent = capTarget.pile.no + ' / ' + stepName(capTarget.step);
+  $('#mark').classList.add('on');
+  requestAnimationFrame(() => { fitMark(); drawMark(); });
+}
+$('#mark-close').addEventListener('click', () => { $('#mark').classList.remove('on'); markImg = null; });
+$('#mark-undo').addEventListener('click', () => { markPts.pop(); drawMark(); });
+
+function fitMark() {
+  const st = $('#mark-stage'), cv = $('#markCanvas');
+  cv.width = st.clientWidth; cv.height = st.clientHeight;
+  const s = Math.min(cv.width / markImg.width, cv.height / markImg.height);
+  markScale = s;
+  markOff.x = (cv.width - markImg.width * s) / 2;
+  markOff.y = (cv.height - markImg.height * s) / 2;
+}
+const toImg = p => ({ x: (p.x - markOff.x) / markScale, y: (p.y - markOff.y) / markScale });
+const toDisp = p => ({ x: p.x * markScale + markOff.x, y: p.y * markScale + markOff.y });
+
+function drawMark() {
+  const cv = $('#markCanvas'), c = cv.getContext('2d');
+  c.fillStyle = '#000'; c.fillRect(0, 0, cv.width, cv.height);
+  c.drawImage(markImg, markOff.x, markOff.y, markImg.width * markScale, markImg.height * markScale);
+
+  // 真の鉛直の参照線
+  let ux = -markGrav.gx, uy = -markGrav.gy;
+  const un = Math.hypot(ux, uy) || 1; ux /= un; uy /= un;
+  const dx = ux, dy = -uy, L = Math.max(cv.width, cv.height);
+  c.strokeStyle = 'rgba(88,166,255,.75)'; c.lineWidth = 1.5; c.setLineDash([8, 8]);
+  c.beginPath(); c.moveTo(cv.width / 2 - dx * L, cv.height / 2 - dy * L);
+  c.lineTo(cv.width / 2 + dx * L, cv.height / 2 + dy * L); c.stroke();
+  c.setLineDash([]);
+
+  // 打点と結んだ線
+  markPts.forEach((p, i) => {
+    const d = toDisp(p);
+    c.strokeStyle = i < 2 ? '#f97316' : '#3fb950'; c.lineWidth = 2;
+    c.beginPath(); c.arc(d.x, d.y, 9, 0, Math.PI * 2); c.stroke();
+    c.beginPath(); c.moveTo(d.x - 15, d.y); c.lineTo(d.x + 15, d.y);
+    c.moveTo(d.x, d.y - 15); c.lineTo(d.x, d.y + 15); c.stroke();
+  });
+  [[0, 1, '#f97316'], [2, 3, '#3fb950']].forEach(([a, b, col]) => {
+    if (markPts[a] && markPts[b]) {
+      const p1 = toDisp(markPts[a]), p2 = toDisp(markPts[b]);
+      c.strokeStyle = col; c.lineWidth = 2;
+      c.beginPath(); c.moveTo(p1.x, p1.y); c.lineTo(p2.x, p2.y); c.stroke();
+    }
+  });
+
+  $('#mark-msg').innerHTML = markPts.length < 4
+    ? '(' + (markPts.length + 1) + '/4) ' + MARK_GUIDE[markPts.length]
+    : livePreview();
+  $('#mark-ok').disabled = markPts.length < 4;
+}
+
+function livePreview() {
+  const v = buildView(markPts, markGrav, markImg.width);
+  let s = (v.angle >= 0 ? '右へ ' : '左へ ') + fmt(Math.abs(v.angle), 3) + '°　1/' +
+          (Math.abs(v.tan) > 1e-9 ? fmt(1 / Math.abs(v.tan), 0) : '∞');
+  if (v.edgeDiff > 0.4) s += '　<span style="color:var(--warn)">左右エッジ差 ' + fmt(v.edgeDiff, 2) + '° 大</span>';
+  if (Math.abs(v.offset) > 0.15) s += '　<span style="color:var(--warn)">中央から外れています</span>';
+  return s;
+}
+
+/* ルーペ操作 */
+(() => {
+  const stage = $('#mark-stage'), loupe = $('#loupe'), lc = $('#loupeCanvas');
+  let active = false, cur = null;
+  const ZOOM = 4, R = 65;
+
+  function pos(e) {
+    const r = stage.getBoundingClientRect();
+    const t = e.touches ? e.touches[0] : e;
+    return { x: t.clientX - r.left, y: t.clientY - r.top };
+  }
+  function showLoupe(p) {
+    const ip = toImg(p);
+    const g = lc.getContext('2d');
+    g.fillStyle = '#000'; g.fillRect(0, 0, 130, 130);
+    g.save();
+    g.beginPath(); g.arc(R, R, R - 2, 0, Math.PI * 2); g.clip();
+    g.imageSmoothingEnabled = false;
+    const src = R / (markScale * ZOOM);
+    g.drawImage(markImg, ip.x - src, ip.y - src, src * 2, src * 2, 0, 0, 130, 130);
+    g.restore();
+    g.strokeStyle = '#f97316'; g.lineWidth = 1;
+    g.beginPath(); g.moveTo(R - 14, R); g.lineTo(R + 14, R);
+    g.moveTo(R, R - 14); g.lineTo(R, R + 14); g.stroke();
+    loupe.style.left = clamp(p.x - R, 0, stage.clientWidth - 130) + 'px';
+    loupe.style.top  = clamp(p.y - R - 100, 0, stage.clientHeight - 130) + 'px';
+    loupe.classList.add('on');
+  }
+  function down(e) {
+    if (!markImg || markPts.length >= 4) return;
+    e.preventDefault(); active = true; cur = pos(e); showLoupe(cur);
+  }
+  function move(e) { if (!active) return; e.preventDefault(); cur = pos(e); showLoupe(cur); }
+  function up() {
+    if (!active) return;
+    active = false; loupe.classList.remove('on');
+    if (cur) { markPts.push(toImg(cur)); drawMark(); }
+    cur = null;
+  }
+  stage.addEventListener('touchstart', down, { passive: false });
+  stage.addEventListener('touchmove', move, { passive: false });
+  stage.addEventListener('touchend', up);
+  stage.addEventListener('mousedown', down);
+  stage.addEventListener('mousemove', move);
+  stage.addEventListener('mouseup', up);
+})();
+
+$('#mark-ok').addEventListener('click', async () => {
+  if (markPts.length < 4) return;
+  const view = buildView(markPts, markGrav, markImg.width);
+
+  // サムネイルのみ保存（原寸はストレージを圧迫するため）
+  const th = document.createElement('canvas');
+  const s = 640 / Math.max(markImg.width, markImg.height);
+  th.width = Math.round(markImg.width * s); th.height = Math.round(markImg.height * s);
+  th.getContext('2d').drawImage(markImg, 0, 0, th.width, th.height);
+  const key = uid();
+  try { await ImgStore.put(key, th.toDataURL('image/jpeg', 0.6)); } catch (e) { /* 画像なしでも継続 */ }
+  view.imgKey = key;
+
+  const m = ensureMeas(capTarget.pile.id, capTarget.step);
+  const old = m[capTarget.view];
+  if (old && old.imgKey) ImgStore.del(old.imgKey);
+  m[capTarget.view] = view;
+  commitMeas(m);
+
+  $('#mark').classList.remove('on'); markImg = null;
+  curStep = capTarget.step;
+  renderMeasure();
+  toast('視点' + capTarget.view + ' を記録しました');
+});
+
+/* =========================================================
+   記録
+   ========================================================= */
+function renderRecords() {
+  const box = $('#r-body'); box.innerHTML = '';
+  if (!DB.piles.length) { box.innerHTML = '<div class="card hint">データがありません。</div>'; return; }
+  DB.piles.forEach(p => {
+    const s = pileSummary(p.id);
+    const c = document.createElement('div'); c.className = 'card';
+    let h = '<div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">' +
+            '<div class="pile-no">' + esc(p.no) + '</div>' +
+            '<div class="pile-meta">φ' + (p.dia || '-') + ' / GL-' + fmt(p.headDepth, 2) + 'm</div></div>';
+    h += '<table class="kv"><tbody>';
+    STEPS.forEach(st => {
+      const b = s.byStep[st.key];
+      if (!b) return;
+      h += '<tr><td>' + st.name + ' 傾斜</td><td>' +
+           (b.tilt ? '<span class="badge ' + tiltBadge(b.tilt) + '">1/' + fmt(b.tilt.ratio, 0) + '</span>' : '<span class="badge b-dim">2視点未完</span>') +
+           '</td></tr>';
+    });
+    if (s.joint) h += '<tr><td>継手 折れ角</td><td>1/' + fmt(s.joint.ratio, 0) + '（' + fmt(s.joint.deg, 3) + '°）</td></tr>';
+    if (s.head) {
+      const ng = s.head.mag > s.allow;
+      h += '<tr><td>杭頭 合成偏芯</td><td><span class="badge ' + (ng ? 'b-ng' : 'b-ok') + '">' +
+           fmt(s.head.mag, 0) + ' mm</span> / 許容 ' + fmt(s.allow, 0) + '</td></tr>';
+    }
+    h += '</tbody></table>';
+    c.innerHTML = h;
+    box.appendChild(c);
+  });
+}
+
+function download(name, text, mime) {
+  const blob = new Blob([text], { type: mime + ';charset=utf-8' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob); a.download = name;
+  document.body.appendChild(a); a.click();
+  setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+}
+
+$('#r-csv').addEventListener('click', () => {
+  const head = ['杭番号','杭径mm','設計杭頭深さm','ヤットコ','ステップ','日時',
+                '視点A_度','視点B_度','合成傾斜_度','合成傾斜_1/n','傾斜判定',
+                'ピッチA_度','ピッチB_度','エッジ差A_度','エッジ差B_度',
+                '偏芯実測A_mm','偏芯実測B_mm','偏芯計測高さm','外挿Δh_m',
+                '杭頭偏芯A_mm','杭頭偏芯B_mm','杭頭合成偏芯_mm','偏芯許容_mm','偏芯判定',
+                '継手折れ角_度','継手折れ角_1/n'];
+  const rows = [head];
+  DB.piles.forEach(p => {
+    const s = pileSummary(p.id);
+    STEPS.forEach(st => {
+      const b = s.byStep[st.key]; if (!b) return;
+      const m = b.meas, t = b.tilt;
+      const lim = 1 / DB.settings.tiltN;
+      const r = [
+        p.no, p.dia, p.headDepth, p.yat ? 'あり' : 'なし', st.name,
+        new Date(m.at).toLocaleString('ja-JP'),
+        m.A ? m.A.angle.toFixed(4) : '', m.B ? m.B.angle.toFixed(4) : '',
+        t ? t.deg.toFixed(4) : '', t ? t.ratio.toFixed(0) : '',
+        t ? (t.mag > lim ? '要協議' : '合格') : '',
+        m.A ? m.A.pitch.toFixed(2) : '', m.B ? m.B.pitch.toFixed(2) : '',
+        m.A ? m.A.edgeDiff.toFixed(3) : '', m.B ? m.B.edgeDiff.toFixed(3) : '',
+      ];
+      if (st.key === 'final' && m.ecc) {
+        const dh = (m.ecc.measH || 0) + (p.headDepth || 0);
+        r.push(m.ecc.eA, m.ecc.eB, m.ecc.measH, dh.toFixed(2));
+        if (s.head) r.push(s.head.hA.toFixed(0), s.head.hB.toFixed(0), s.head.mag.toFixed(0),
+                           s.allow.toFixed(0), s.head.mag > s.allow ? '要協議' : '合格');
+        else r.push('', '', '', '', '');
+      } else r.push('', '', '', '', '', '', '', '', '');
+      if (st.key === 'postweld' && s.joint) r.push(s.joint.deg.toFixed(4), s.joint.ratio.toFixed(0));
+      else r.push('', '');
+      rows.push(r);
+    });
+  });
+  const csv = '﻿' + rows.map(r => r.map(v => {
+    const s2 = String(v == null ? '' : v);
+    return /[",\n]/.test(s2) ? '"' + s2.replace(/"/g, '""') + '"' : s2;
+  }).join(',')).join('\r\n');
+  download('sekobase_pile_' + new Date().toISOString().slice(0, 10) + '.csv', csv, 'text/csv');
+});
+
+$('#r-json').addEventListener('click', () => {
+  const out = DB.piles.map(p => {
+    const s = pileSummary(p.id);
+    return {
+      no: p.no, dia: p.dia, headDepth: p.headDepth, yatoko: p.yat,
+      steps: Object.keys(s.byStep).map(k => ({
+        step: k, name: stepName(k), at: s.byStep[k].meas.at,
+        tilt: s.byStep[k].tilt ? { deg: s.byStep[k].tilt.deg, ratio: s.byStep[k].tilt.ratio,
+                                   tA: s.byStep[k].tilt.tA, tB: s.byStep[k].tilt.tB } : null,
+      })),
+      joint: s.joint ? { deg: s.joint.deg, ratio: s.joint.ratio } : null,
+      headEcc: s.head ? { A: s.head.hA, B: s.head.hB, mag: s.head.mag, dh: s.head.dh_m } : null,
+      allow: s.allow,
+      judge: s.head ? (s.head.mag > s.allow ? 'NG' : 'OK') : null,
+    };
+  });
+  download('sekobase_pile_' + new Date().toISOString().slice(0, 10) + '.json',
+           JSON.stringify({ generatedAt: new Date().toISOString(), settings: DB.settings, piles: out }, null, 2),
+           'application/json');
+});
+
+/* =========================================================
+   設定
+   ========================================================= */
+function renderSetup() {
+  $('#s-tilt').value = DB.settings.tiltN;
+  $('#s-ecc').value = DB.settings.eccMax;
+  $('#s-pitch').value = DB.settings.pitchTol;
+  $('#s-hfov').value = DB.settings.hfov;
+}
+$('#s-save').addEventListener('click', () => {
+  DB.settings.tiltN   = parseFloat($('#s-tilt').value)  || 100;
+  DB.settings.eccMax  = parseFloat($('#s-ecc').value)   || 100;
+  DB.settings.pitchTol= parseFloat($('#s-pitch').value) || 1.0;
+  DB.settings.hfov    = parseFloat($('#s-hfov').value)  || 65;
+  saveDB(); toast('設定を保存しました'); renderPiles();
+});
+$('#s-perm').addEventListener('click', async () => { if (await Sensor.requestPermission()) toast('センサーを有効にしました'); });
+$('#s-clear').addEventListener('click', () => {
+  if (!confirm('すべての杭と計測記録を削除します。取り消せません。よろしいですか？')) return;
+  DB.meas.forEach(m => ['A','B'].forEach(k => { if (m[k] && m[k].imgKey) ImgStore.del(m[k].imgKey); }));
+  DB.piles = []; DB.meas = []; DB.selPile = null;
+  saveDB(); renderPiles(); renderRecords(); toast('消去しました');
+});
+
+setInterval(() => {
+  const t = $('#s-sensor'); if (!t || !$('#tab-setup').classList.contains('on')) return;
+  t.innerHTML =
+    '<tr><td>傾斜センサー</td><td>' + (Sensor.ok ? '<span class="badge b-ok">取得中</span>' : '<span class="badge b-ng">未取得</span>') + '</td></tr>' +
+    '<tr><td>取得方式</td><td>' + Sensor.source + '</td></tr>' +
+    '<tr><td>ピッチ（光軸の水平からの傾き）</td><td>' + fmt(Sensor.pitchDeg, 2) + '°</td></tr>' +
+    '<tr><td>ロール（画面の鉛直からの傾き）</td><td>' + fmt(Sensor.rollDeg, 2) + '°</td></tr>' +
+    '<tr><td>安定度（直近1秒 1σ）</td><td>' + (Sensor.stabilityDeg === null ? '-' : fmt(Sensor.stabilityDeg, 3) + '°') + '</td></tr>' +
+    '<tr><td>接続</td><td>' + (location.protocol === 'https:' || location.hostname === 'localhost' ? 'HTTPS' : '<span class="badge b-ng">非HTTPS</span>') + '</td></tr>';
+}, 300);
+
+/* =========================================================
+   縦持ちチェック / 起動
+   ========================================================= */
+function checkRotation() {
+  const a = (screen.orientation && screen.orientation.angle) || window.orientation || 0;
+  $('#rotwarn').classList.toggle('on', Math.abs(a) === 90 || Math.abs(a) === 270);
+}
+window.addEventListener('orientationchange', () => setTimeout(checkRotation, 250));
+window.addEventListener('resize', checkRotation);
+
+loadDB();
+renderPiles();
+renderSetup();
+renderMeasure();
+checkRotation();
+Sensor.start();     // iOS では設定タブ or 撮影時に requestPermission が走る
+</script>
+</body>
+</html>
