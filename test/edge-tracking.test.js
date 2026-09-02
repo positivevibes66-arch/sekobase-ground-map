@@ -19,7 +19,7 @@ function loadTracker() {
     cut('/* 画像内の線分', '/* 4点（左エッジ2点') +
     cut('const SCAN_TOP', '/* ---------------- 実行 ----------------') +
     '\nmodule.exports={findEdge,fitLineX,trackFrame,calibratePolarity,angleFromTrueVertical,' +
-    'verticalSlope,Guides,Cont,SCAN_TOP,SCAN_BOT};';
+    'verticalSlope,trackLine,gravFromLine,Guides,Cont,SCAN_TOP,SCAN_BOT};';
   const ctx = { module: { exports: {} }, document: { createElement: () => ({ getContext: () => null }) },
                 $: () => null, $$: () => [], window: {}, performance: { now: () => 0 } };
   vm.createContext(ctx);
@@ -234,6 +234,54 @@ console.log('\n--- 7c. 走査範囲が指定した範囲に従うか（杭が画
     ok('杭が写っている範囲 (5〜50%) を走査', good.angle, want, 0.02);
   }
   T.Guides.yTop = T.SCAN_TOP; T.Guides.yBot = T.SCAN_BOT;
+}
+
+/* 実映像で分かったこと:
+   手持ちで撮ると平行移動はほとんど無くてもカメラは光軸まわりに回る。
+   ある映像では平行移動が画面幅の0.5%しか無いのにロールが0.78°あった。
+   ロールは平行移動に現れないので見落としやすいが、管理値(0.573°)より大きい。
+   画角内の鉛直な物を毎フレーム追えば打ち消せる。 */
+console.log('\n--- 7d. カメラのロールを、画角内の鉛直基準で打ち消せるか ---');
+{
+  const band = (px, xTop, slope, hw, val) => {
+    const ym = H / 2, S = t => 1 / (1 + Math.exp(-t / 0.9));
+    for (let y = 0; y < H; y++) {
+      const c = xTop + slope * (y - ym);
+      for (let x = Math.max(0, Math.round(c - hw - 4)); x < Math.min(W, Math.round(c + hw + 4)); x++) {
+        const a = S(x - (c - hw)) * (1 - S(x - (c + hw)));
+        px[y * W + x] = px[y * W + x] * (1 - a) + val * a;
+      }
+    }
+  };
+  const TILT = 0.40;                                  // 杭の真の傾斜
+  const raw = [], fixed = [];
+  for (const camRoll of [-0.8, -0.4, 0, 0.5, 0.9]) {   // カメラのロール
+    const px = new Float32Array(W * H).fill(205);
+    for (let i = 0; i < W * H; i++) px[i] += (rnd() - 0.5) * 6;
+    band(px, 300, -Math.tan(camRoll / R2D), 16, 40);            // 鉛直基準（電柱など）
+    band(px, 760, -Math.tan((TILT + camRoll) / R2D), 70, 62);   // 杭（ロールの分だけ一緒に回る）
+    const ctx = makeCtx(px);
+
+    // 鉛直基準を追う
+    const ref = T.trackLine(ctx, { a: 300, b: 0, ym: H / 2 }, H * 0.2, H * 0.8, 40, -1, 0);
+    if (!ref) { fails++; console.log('FAIL ロール' + camRoll + '° 基準を追えない'); continue; }
+    const grav = T.gravFromLine(ref, H * 0.2, H * 0.8);
+
+    T.Guides.L = 760 - 70; T.Guides.R = 760 + 70;
+    T.calibratePolarity(ctx);
+    const a0 = T.trackFrame(ctx, upright, null);      // 補正なし
+    const a1 = T.trackFrame(ctx, grav, null);         // 鉛直基準で補正
+    if (!a1) { fails++; console.log('FAIL ロール' + camRoll + '° 杭を追えない'); continue; }
+    raw.push(a0 ? a0.angle : NaN); fixed.push(a1.angle);
+    console.log('     カメラのロール ' + String(camRoll).padStart(5) + '° → 補正なし ' +
+      (a0 ? a0.angle.toFixed(3) : '  -  ').padStart(6) + '°  補正あり ' + a1.angle.toFixed(3).padStart(6) + '°');
+  }
+  const sd = a => { const m = a.reduce((x, y) => x + y, 0) / a.length;
+                    return Math.sqrt(a.reduce((x, y) => x + (y - m) ** 2, 0) / a.length); };
+  console.log('     ばらつき: 補正なし 1σ=' + sd(raw).toFixed(3) + '° → 補正あり 1σ=' + sd(fixed).toFixed(3) + '°');
+  ok('補正後の平均が真の傾斜と一致', fixed.reduce((a, b) => a + b, 0) / fixed.length, TILT, 0.05);
+  ok('補正でカメラのロールが消える (1σ<0.1°)', sd(fixed), 0, 0.1);
+  if (!(sd(raw) > sd(fixed) * 3)) { fails++; console.log('FAIL 補正の効果が出ていない'); }
 }
 
 console.log('\n--- 7. 連続フレームの平均で精度が上がるか（首振りのシミュレーション）---');

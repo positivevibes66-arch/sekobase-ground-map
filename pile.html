@@ -1113,6 +1113,7 @@ const SCAN_TOP = 0.15, SCAN_BOT = 0.85;   // 走査範囲の初期値（画面�
 const SCAN_N = 11;                        // 走査線の本数
 const WIN_WIDE = 55, WIN_LOCK = 26, WIN_MAX = 55;    // エッジ探索の窓幅[px]
 const FIT_RMS_MAX = 1.5;                  // 直線フィットの許容残差[px]
+const EDGE_AGREE = 0.15;                  // 左右のエッジが一致とみなす角度差[deg]
 
 let camMode = 'cont';
 /* 杭の位置と、追跡に使う縦方向の範囲。
@@ -1265,6 +1266,27 @@ function fitLineX(pts) {
   return f;
 }
 
+/* 画像中の1本の線（杭のエッジ、鉛直基準の柱など）を追う。
+   base から予測しながら走査し、RANSAC で最も多くの走査線が乗る直線を返す。 */
+function trackLine(ctx, base, yTop, yBot, win, sign, slopePrior) {
+  const lines = [];
+  for (let i = 0; i < SCAN_N; i++) {
+    const y = yTop + (yBot - yTop) * (i / (SCAN_N - 1));
+    lines.push({ y, list: findEdgeCandidates(ctx, base.a + base.b * (y - base.ym), y, win, sign) });
+  }
+  const f = fitEdgeRansac(lines, slopePrior);
+  return (f && f.n >= 6 && f.rms <= FIT_RMS_MAX) ? f : null;
+}
+
+/* 直線の向きから、その線を鉛直とみなしたときの重力ベクトルを作る。
+   据置きでないカメラの映像では、画角内の鉛直な物を毎フレーム追って
+   これを求めることで、カメラのロールを打ち消せる。 */
+function gravFromLine(f, yTop, yBot) {
+  const dx = f.b * (yBot - yTop), dy = yBot - yTop;   // 下向きの方向ベクトル
+  const n = Math.hypot(dx, dy) || 1;
+  return { gx: dx / n, gy: -dy / n, gz: 0, pitch: 0, roll: Math.atan2(dx / n, dy / n) * R2D, stab: null };
+}
+
 /* 1フレームぶんの追跡。
 
    実映像で分かったこと:
@@ -1299,13 +1321,8 @@ function trackFrame(ctx, grav, prev) {
     const locked = base0[k];
     const base = locked || { a: Guides[k], b: slope, ym };
     const win = locked ? Math.min(WIN_LOCK * (1 + lost), WIN_MAX) : WIN_WIDE;
-    const lines = [];
-    for (let i = 0; i < SCAN_N; i++) {
-      const y = yTop + (yBot - yTop) * (i / (SCAN_N - 1));
-      lines.push({ y, list: findEdgeCandidates(ctx, base.a + base.b * (y - base.ym), y, win, Cont.sign[k]) });
-    }
-    const f = fitEdgeRansac(lines, slope);
-    if (f && f.n >= 6 && f.rms <= FIT_RMS_MAX) fits[k] = f;
+    const f = trackLine(ctx, base, yTop, yBot, win, Cont.sign[k], slope);
+    if (f) fits[k] = f;
   }
   if (!fits.L && !fits.R) return null;
 
@@ -1314,20 +1331,42 @@ function trackFrame(ctx, grav, prev) {
     { x: f.a + f.b * (yBot - f.ym), y: yBot }, grav);
 
   const out = { L: fits.L || null, R: fits.R || null };
-  if (fits.L && fits.R) {
-    const aL = ang(fits.L), aR = ang(fits.R);
-    if (Math.abs(aL - aR) > 0.5) return null;   // 片方が別の線を掴んでいる
-    out.angleL = aL; out.angleR = aR; out.angle = (aL + aR) / 2;
-    out.midX = (fits.L.a + fits.R.a) / 2;
-    out.edges = 2;
-  } else {
-    const k = fits.L ? 'L' : 'R', f = fits[k];
-    const a = ang(f);
+  const half = Math.abs(Guides.R - Guides.L) / 2;
+  const single = k => {
+    const f = fits[k], a = ang(f);
     out.angleL = a; out.angleR = a; out.angle = a;
-    // 片側しか無いときは、指定された幅の半分だけ内側を中心とみなす
-    const half = Math.abs(Guides.R - Guides.L) / 2;
     out.midX = f.a + (k === 'L' ? half : -half);
     out.edges = 1;
+    out.only = k;
+  };
+
+  if (fits.L && fits.R) {
+    const aL = ang(fits.L), aR = ang(fits.R);
+    if (Math.abs(aL - aR) <= EDGE_AGREE) {
+      out.angleL = aL; out.angleR = aR; out.angle = (aL + aR) / 2;
+      out.midX = (fits.L.a + fits.R.a) / 2;
+      out.edges = 2;
+    } else {
+      /* 食い違うのは、片方が杭ではない物（重機のリーダーなど、杭のそばに
+         ある別の鉛直な線）を掴んでいるということ。
+         実映像ではこれを棄却していたせいで、良く写っている側が毎フレーム
+         通っているのに 57/116 が落ちていた。
+         棄却せず、当たりの良いほう（乗った本数 → 残差 → 指定位置への近さ）
+         を採り、食い違いは記録して結果に出す。 */
+      const score = (k) => {
+        const f = fits[k];
+        return [-f.n, f.rms, Math.abs(f.a - Guides[k])];
+      };
+      const sL = score('L'), sR = score('R');
+      let pick = 'L';
+      for (let i = 0; i < 3; i++) {
+        if (sL[i] !== sR[i]) { pick = sL[i] < sR[i] ? 'L' : 'R'; break; }
+      }
+      single(pick);
+      out.disagree = Math.abs(aL - aR);
+    }
+  } else {
+    single(fits.L ? 'L' : 'R');
   }
   return out;
 }
@@ -1377,6 +1416,34 @@ function calibratePolarity(ctx) {
   const dark = (inN ? inS / inN : 0) < (outN ? outS / outN : 0);
   // 杭が暗ければ、左エッジは右へ進むと暗くなる（勾配が負）
   Cont.sign = dark ? { L: -1, R: 1 } : { L: 1, R: -1 };
+}
+
+/* 指定された2点から、鉛直基準を毎フレーム追うための情報を作る。
+
+   実映像で分かったこと: 手持ちで撮ると、平行移動はほとんど無くても
+   カメラは光軸まわりに回る。ある映像では平行移動が画面幅の0.5%しか
+   無いのにロールが0.78°あった。ロールは平行移動には現れないので
+   見落としやすいが、管理値(1/100 = 0.573°)より大きい。
+   基準を先頭フレームで1回決めるだけでは打ち消せないので、
+   画角内の鉛直な物を毎フレーム追ってその向きを使う。            */
+function makeRefTracker(pts, seed) {
+  const ctx = seed.getContext('2d');
+  const ys = pts.map(p => p.y);
+  const yTop = Math.min(...ys), yBot = Math.max(...ys);
+  const ym = (yTop + yBot) / 2;
+  const b = (pts[1].x - pts[0].x) / ((pts[1].y - pts[0].y) || 1);
+  const a = pts[0].x + b * (ym - pts[0].y);
+
+  // 指定された線が明→暗のどちら向きの段差かを、その場で判定する
+  let best = 0, sign = 1;
+  for (let i = 1; i < 6; i++) {
+    const y = yTop + (yBot - yTop) * (i / 6);
+    for (const sg of [1, -1]) {
+      const cands = findEdgeCandidates(ctx, a + b * (y - ym), y, 14, sg);
+      if (cands.length && cands[0].v > best) { best = cands[0].v; sign = sg; }
+    }
+  }
+  return { base: { a, b, ym }, yTop, yBot, sign, ok: best > 0 };
 }
 
 /* ---------------- 実行 ---------------- */
@@ -1787,6 +1854,7 @@ $('#mark-ok').addEventListener('click', async () => {
 const VF = {
   url: null, name: '', grav: { gx: 0, gy: -1, gz: 0 }, vertSet: false, edgesSet: false,
   seed: null, samples: [], rejected: 0, running: false, result: null, model: null, rate: 4,
+  ref: null, refModel: null, refRolls: [], refLost: 0,
 };
 
 function openVideoFile(pile, step, view) {
@@ -1801,7 +1869,8 @@ $('#vf-input').addEventListener('change', async e => {
   if (!capTarget) { toast('杭と視点を選んでから動画を読み込んでください'); return; }
   if (VF.url) URL.revokeObjectURL(VF.url);
   VF.url = URL.createObjectURL(f); VF.name = f.name;
-  Object.assign(VF, { vertSet: false, edgesSet: false, result: null, samples: [], rejected: 0, model: null });
+  Object.assign(VF, { vertSet: false, edgesSet: false, result: null, samples: [], rejected: 0,
+                      model: null, ref: null, refModel: null, refRolls: [], refLost: 0 });
   VF.grav = { gx: 0, gy: -1, gz: 0 };
 
   const v = $('#vf-video');
@@ -1873,6 +1942,7 @@ $('#vf-vert').addEventListener('click', () => {
       const n = Math.hypot(ux, uy) || 1;
       VF.grav = { gx: -ux / n, gy: -uy / n, gz: 0 };
       VF.vertSet = true;
+      VF.ref = makeRefTracker(pts, VF.seed);
       closeMark(); vfMsg();
     },
   });
@@ -1936,7 +2006,8 @@ async function runVideo() {
   workCtx.drawImage(VF.seed, 0, 0);
   calibratePolarity(workCtx);
 
-  Object.assign(VF, { running: true, samples: [], rejected: 0, model: null });
+  Object.assign(VF, { running: true, samples: [], rejected: 0, model: null,
+                      refModel: null, refRolls: [], refLost: 0 });
   $('#vf-run').textContent = '中止';
   $('#vf-run').disabled = false;
   v.currentTime = 0;
@@ -1954,7 +2025,20 @@ async function runVideo() {
     }
     if (meta) lastMediaTime = meta.mediaTime;
     workCtx.drawImage(v, 0, 0);
-    const f = trackFrame(workCtx, VF.grav, VF.model);
+
+    // 鉛直基準を毎フレーム追い、カメラのロールを打ち消す
+    let grav = VF.grav;
+    if (VF.ref && VF.ref.ok) {
+      const rf = trackLine(workCtx, VF.refModel || VF.ref.base,
+                           VF.ref.yTop, VF.ref.yBot, VF.refModel ? WIN_LOCK : WIN_WIDE,
+                           VF.ref.sign, VF.ref.base.b);
+      if (rf) {
+        VF.refModel = rf;
+        grav = gravFromLine(rf, VF.ref.yTop, VF.ref.yBot);
+        VF.refRolls.push(grav.roll);
+      } else { VF.refModel = null; VF.refLost++; }
+    }
+    const f = trackFrame(workCtx, grav, VF.model);
     if (f) {
       VF.model = { L: f.L, R: f.R, lost: 0 };
       VF.samples.push({ t: v.currentTime * 1000, angle: f.angle,
@@ -1987,9 +2071,12 @@ function finishVideo() {
       '点）。エッジの指定をやり直すか、背景とのコントラストが取れる画角で撮り直してください。</span>';
     return;
   }
+  const rolls = VF.refRolls;
+  const camRoll = rolls.length ? Math.max(...rolls) - Math.min(...rolls) : null;
   VF.result = buildViewFromSamples(S, workCv.width, {
     rejected: VF.rejected, src: 'file', fileName: VF.name,
     vertRef: VF.vertSet ? vertRefDeg() : null,
+    refTracked: rolls.length, refLost: VF.refLost, camRoll,
     durMs: S.length ? S[S.length - 1].t - S[0].t : 0,
   });
   $('#vf-live').style.display = 'none';
@@ -1998,8 +2085,15 @@ function finishVideo() {
   $('#vf-rmsg').innerHTML = resultHTML(VF.result) +
     '<div style="color:var(--dim);font-size:11px;margin-top:4px">' +
     fmt(span, 1) + '秒ぶんを ' + VF.rate + '倍速で解析（実効 ' + fmt(S.length / (span || 1), 1) + ' fps）<br>' +
-    (VF.vertSet ? '鉛直基準を指定（画像の鉛直から ' + fmt(vertRefDeg(), 2) + '°）'
-                : '画像の鉛直を使用（カメラが水平に据えられている前提）') + '</div>';
+    (VF.vertSet
+      ? '鉛直基準を毎フレーム追跡（' + VF.result.refTracked + 'F' +
+        (VF.refLost ? ' / 見失い ' + VF.refLost : '') + '）' +
+        (VF.result.camRoll !== null
+          ? '<br>カメラのロール ' + fmt(VF.result.camRoll, 2) + '°' +
+            (VF.result.camRoll > 0.573
+              ? '　<span style="color:var(--warn)">管理値より大きい。基準の追跡が効いています</span>' : '')
+          : '')
+      : '画像の鉛直を使用（カメラが動いていない前提。手持ちなら① 鉛直基準を指定してください）') + '</div>';
   drawSpark($('#vf-spark'), VF.result);
 }
 
