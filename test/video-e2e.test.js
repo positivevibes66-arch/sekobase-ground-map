@@ -54,7 +54,8 @@ const WOBBLE   = 0.30;   // 首振り振幅
   await p.goto(BASE + '/pile.html', { waitUntil: 'networkidle' });
 
   // 杭を1本用意して計測タブへ
-  await p.fill('#p-no', 'V-1'); await p.fill('#p-dia', '267.4'); await p.fill('#p-head', '1.2');
+  // 杭径 340mm、映像内の見かけ 68px → 5.00 mm/px になるようにしておく
+  await p.fill('#p-no', 'V-1'); await p.fill('#p-dia', '340'); await p.fill('#p-head', '1.2');
   await p.click('#p-add');
   await p.click('.pile-item [data-act="sel"]');
 
@@ -134,7 +135,21 @@ const WOBBLE   = 0.30;   // 首振り振幅
   console.log('ガイド位置:', await p.evaluate(() => 'L=' + Guides.L.toFixed(1) + ' R=' + Guides.R.toFixed(1)));
   console.log('状態:', (await p.textContent('#vf-msg')).replace(/\s+/g, ' ').trim());
 
-  // --- ③ 解析。等速と早送りの両方を通し、フレーム落ちが結果を歪めないか見る ---
+  // --- ③ 設計芯を指定（杭の中心 x=320 に対して 20px 左 → +100mm のはず）---
+  const ECC_PX = 20, EXPECT_MM = ECC_PX * (340 / (2 * hw));
+  await p.click('#vf-design');
+  await p.waitForSelector('#mark.on');
+  {
+    const q = { x: xc - ECC_PX, y: H / 2 };     // 傾きの回転中心の高さ = 中心が xc ちょうど
+    const d = await p.evaluate(pt => { const r = toDisp(pt); return { x: r.x, y: r.y }; }, q);
+    const st = await p.locator('#mark-stage').boundingBox();
+    await p.mouse.move(st.x + d.x, st.y + d.y);
+    await p.mouse.down(); await p.mouse.move(st.x + d.x, st.y + d.y); await p.mouse.up();
+    await p.click('#mark-ok');
+  }
+  console.log('設計芯の指定後:', (await p.textContent('#vf-msg')).replace(/\s+/g, ' ').trim());
+
+  // --- ④ 解析。等速と早送りの両方を通し、フレーム落ちが結果を歪めないか見る ---
   const analyse = async rate => {
     await p.evaluate(r => { VF.rate = r; document.querySelector('#vf-rate').textContent = r + '倍'; }, rate);
     await p.click('#vf-run');
@@ -142,6 +157,8 @@ const WOBBLE   = 0.30;   // 首振り振幅
     const out = await p.evaluate(() => ({
       angle: VF.result.angle, sd: VF.result.sd, sem: VF.result.sem,
       n: VF.result.n, rej: VF.result.rejected, edgeDiff: VF.result.edgeDiff,
+      widthPx: VF.result.widthPx, mmPerPx: VF.result.mmPerPx,
+      eccMm: VF.result.eccMm, eccSd: VF.result.eccSd,
     }));
     console.log('\n' + rate + '倍速で解析:');
     console.log('  採用 ' + out.n + ' フレーム / 追跡失敗 ' + out.rej);
@@ -149,6 +166,10 @@ const WOBBLE   = 0.30;   // 首振り振幅
     console.log('  1σ ' + out.sd.toFixed(3) + '°（首振り振幅 ±' + WOBBLE + '° を反映）');
     console.log('  平均の標準誤差 ±' + out.sem.toFixed(4) + '°');
     console.log('  左右エッジ差 ' + out.edgeDiff.toFixed(4) + '°');
+    if (out.eccMm !== undefined)
+      console.log('  偏芯 ' + out.eccMm.toFixed(1) + 'mm （真値 ' + EXPECT_MM.toFixed(1) +
+                  'mm、見かけの幅 ' + out.widthPx.toFixed(1) + 'px = ' + out.mmPerPx.toFixed(3) +
+                  ' mm/px、ばらつき ±' + out.eccSd.toFixed(1) + 'mm）');
     return out;
   };
   const r = await analyse(1);
@@ -172,6 +193,10 @@ const WOBBLE   = 0.30;   // 首振り振幅
   check('平均が真値と統計的に整合 (|誤差| < 3×標準誤差)', Math.abs(r.angle - TRUE_DEG) < 3 * r.sem);
   check('首振りがばらつきとして現れる (1σ > 0.1°)', r.sd > 0.1);
   check('左右エッジが平行 (<0.1°)', r.edgeDiff < 0.1);
+  check('偏芯が測れている', r.eccMm !== undefined);
+  check('偏芯の誤差 < 5mm', r.eccMm !== undefined && Math.abs(r.eccMm - EXPECT_MM) < 5);
+  check('スケールが杭径から正しく出る (±2%)',
+        r.mmPerPx !== undefined && Math.abs(r.mmPerPx - 340 / (2 * hw)) / (340 / (2 * hw)) < 0.02);
   check('JSエラーなし', errs.length === 0);
   if (errs.length) console.log(errs.join('\n'));
 

@@ -357,10 +357,11 @@
       <div class="tapmsg" id="vf-msg"></div>
       <div class="progwrap"><div class="prog" id="vf-prog"></div></div>
       <div style="display:flex;gap:8px">
-        <button class="btn" id="vf-vert" style="flex:1">① 鉛直基準</button>
+        <button class="btn" id="vf-vert" style="flex:1">① 鉛直</button>
         <button class="btn" id="vf-edges" style="flex:1">② エッジ</button>
-        <button class="btn" id="vf-rate" style="flex:0 0 62px">4倍</button>
-        <button class="btn primary" id="vf-run" style="flex:1" disabled>③ 解析</button>
+        <button class="btn" id="vf-design" style="flex:1">③ 設計芯</button>
+        <button class="btn" id="vf-rate" style="flex:0 0 56px">4倍</button>
+        <button class="btn primary" id="vf-run" style="flex:1" disabled>④ 解析</button>
       </div>
     </div>
     <div id="vf-result" style="display:none">
@@ -897,6 +898,12 @@ function fmtSigned(t) {
   return s + ' 1/' + (Math.abs(t) > 1e-9 ? fmt(1 / Math.abs(t), 0) : '∞');
 }
 
+const hasVideoEcc = m => ['A', 'B'].some(k => m[k] && m[k].eccMm !== undefined);
+function videoEccLabel(m) {
+  return ['A', 'B'].map(k => k + ': ' +
+    (m[k] && m[k].eccMm !== undefined ? fmt(m[k].eccMm, 0) + 'mm' : '-')).join(' / ');
+}
+
 function buildEccCard(p, m, tilt) {
   const c = document.createElement('div'); c.className = 'card';
   const e = m.ecc || { eA: '', eB: '', measH: '' };
@@ -910,6 +917,10 @@ function buildEccCard(p, m, tilt) {
     '</div>' +
     '<label class="f"><span>偏芯を測った高さ　GL+ (m)　※ GL以下なら負の値</span>' +
       '<input id="e-h" type="number" inputmode="decimal" step="0.01" value="' + e.measH + '"></label>' +
+    (hasVideoEcc(m)
+      ? '<button class="btn" id="e-fromvideo" style="margin-bottom:10px">動画の計測値を使う（' +
+          videoEccLabel(m) + '）</button>'
+      : '') +
     '<button class="btn" id="e-save">保存して判定</button>' +
     '<div id="e-out" style="margin-top:14px"></div>';
 
@@ -939,6 +950,12 @@ function buildEccCard(p, m, tilt) {
         '<div class="hint" style="margin-top:12px">※ 外挿は<b>杭が直線であること</b>を前提としています。地中での偏向（玉石・支持層の傾斜など）は地上からは判定できません。' +
         (p.yat ? '<br>※ ヤットコ計測値は<b>ヤットコと杭が同軸</b>という前提で扱っています。' : '') + '</div>';
     };
+    const fv = $('#e-fromvideo');
+    if (fv) fv.addEventListener('click', () => {
+      if (m.A && m.A.eccMm !== undefined) $('#e-a').value = m.A.eccMm.toFixed(0);
+      if (m.B && m.B.eccMm !== undefined) $('#e-b').value = m.B.eccMm.toFixed(0);
+      toast('動画の計測値を入れました。計測高さは別途入力してください');
+    });
     $('#e-save').addEventListener('click', () => {
       const eA = parseFloat($('#e-a').value), eB = parseFloat($('#e-b').value), measH = parseFloat($('#e-h').value);
       if (!isFinite(eA) || !isFinite(eB)) { toast('視点A・Bのズレを入力してください'); return; }
@@ -1338,6 +1355,19 @@ function trackFrame(ctx, grav, prev) {
     out.midX = f.a + (k === 'L' ? half : -half);
     out.edges = 1;
     out.only = k;
+  };
+
+  /* 杭径が既知なら、見かけの幅がそのまま mm/px のスケールになる。
+     φ318.5mm が 130px に写る条件で 2.46mm/px、サブピクセル0.3pxは0.74mm。
+     偏芯の許容 min(D/4,100)=79.6mm は 32px に相当するので、分解能は桁で足りる。 */
+  out.width = (fits.L && fits.R) ? (fits.R.a + fits.R.b * (ym - fits.R.ym))
+                                 - (fits.L.a + fits.L.b * (ym - fits.L.ym)) : null;
+  out.centerAt = y => {
+    const half = Math.abs(Guides.R - Guides.L) / 2;
+    if (fits.L && fits.R) return ((fits.L.a + fits.L.b * (y - fits.L.ym)) +
+                                  (fits.R.a + fits.R.b * (y - fits.R.ym))) / 2;
+    const k = fits.L ? 'L' : 'R', f = fits[k];
+    return f.a + f.b * (y - f.ym) + (k === 'L' ? half : -half);
   };
 
   if (fits.L && fits.R) {
@@ -1854,7 +1884,7 @@ $('#mark-ok').addEventListener('click', async () => {
 const VF = {
   url: null, name: '', grav: { gx: 0, gy: -1, gz: 0 }, vertSet: false, edgesSet: false,
   seed: null, samples: [], rejected: 0, running: false, result: null, model: null, rate: 4,
-  ref: null, refModel: null, refRolls: [], refLost: 0,
+  ref: null, refModel: null, refRolls: [], refLost: 0, designPt: null,
 };
 
 function openVideoFile(pile, step, view) {
@@ -1870,7 +1900,7 @@ $('#vf-input').addEventListener('change', async e => {
   if (VF.url) URL.revokeObjectURL(VF.url);
   VF.url = URL.createObjectURL(f); VF.name = f.name;
   Object.assign(VF, { vertSet: false, edgesSet: false, result: null, samples: [], rejected: 0,
-                      model: null, ref: null, refModel: null, refRolls: [], refLost: 0 });
+                      model: null, ref: null, refModel: null, refRolls: [], refLost: 0, designPt: null });
   VF.grav = { gx: 0, gy: -1, gz: 0 };
 
   const v = $('#vf-video');
@@ -1919,6 +1949,7 @@ function vfMsg() {
   parts.push(VF.edgesSet
     ? '② エッジ ✓（縦 ' + Math.round(Guides.yTop * 100) + '〜' + Math.round(Guides.yBot * 100) + '%）'
     : '② エッジ — 未設定');
+  parts.push(VF.designPt ? '③ 設計芯 ✓' : '③ 設計芯 — 未設定（傾斜のみ）');
   $('#vf-msg').innerHTML = parts.join('　/　');
   $('#vf-run').disabled = !VF.edgesSet || VF.running;
 }
@@ -1969,6 +2000,21 @@ $('#vf-rate').addEventListener('click', () => {
   VF.rate = seq[(seq.indexOf(VF.rate) + 1) % seq.length];
   $('#vf-rate').textContent = VF.rate + '倍';
 });
+/* 設計芯（逃げ杭からの水糸の交点、地面のマークなど）を1点で指定する。
+   杭の中心線を同じ高さで評価して距離を測るので、カメラが動いても
+   相対量は変わらない。mm への換算は 杭径 ÷ 見かけの幅。 */
+$('#vf-design').addEventListener('click', () => {
+  if (!VF.seed) return;
+  if (!(capTarget.pile.dia > 0)) { toast('杭径が未登録です。杭リストで杭径を入れてください'); return; }
+  openMark(VF.seed, VF.grav, {
+    n: 1, guide: ['<b>設計芯</b>の位置を長押しで合わせる（逃げ杭からの水糸、地面のマークなど）'],
+    title: '設計芯を指定',
+    sub: '杭の中心線をこの高さで評価して偏芯を出します',
+    preview: pts => '杭の中心線との差を、この点の高さで測ります',
+    onDone: pts => { VF.designPt = { x: pts[0].x, y: pts[0].y }; closeMark(); vfMsg(); },
+  });
+});
+
 $('#vf-run').addEventListener('click', () => VF.running ? stopVideoRun() : runVideo());
 $('#vf-retry').addEventListener('click', () => {
   VF.result = null;
@@ -2041,8 +2087,10 @@ async function runVideo() {
     const f = trackFrame(workCtx, grav, VF.model);
     if (f) {
       VF.model = { L: f.L, R: f.R, lost: 0 };
+      const dp = VF.designPt;
       VF.samples.push({ t: v.currentTime * 1000, angle: f.angle,
-                        edgeDiff: Math.abs(f.angleL - f.angleR), midX: f.midX, pitch: 0, edges: f.edges });
+                        edgeDiff: Math.abs(f.angleL - f.angleR), midX: f.midX, pitch: 0, edges: f.edges,
+                        width: f.width, cx: dp ? f.centerAt(dp.y) : null });
     } else { VF.rejected++; VF.model = nextLost(VF.model); }
 
     if (isFinite(v.duration) && v.duration > 0)
@@ -2073,16 +2121,55 @@ function finishVideo() {
   }
   const rolls = VF.refRolls;
   const camRoll = rolls.length ? Math.max(...rolls) - Math.min(...rolls) : null;
-  VF.result = buildViewFromSamples(S, workCv.width, {
+  const med = a => { const b = a.filter(v => v !== null && isFinite(v)).sort((x, y) => x - y);
+                     return b.length ? b[Math.floor(b.length / 2)] : null; };
+  /* mm/px のスケールを決める見かけの幅。
+     追跡した幅は、片側が重機などを掴んだフレームで大きく振れる
+     （実映像では中央値130pxに対して振れ幅48px）。
+     ばらつきが小さいときだけ追跡値を使い、そうでなければ
+     利用者が②で指定した左右エッジの間隔を使う（人が見て確かめた値）。 */
+  const seedWidth = Math.abs(Guides.R - Guides.L);
+  const ws = S.map(s => s.width).filter(v => v !== null && isFinite(v)).sort((a, b) => a - b);
+  const wMed = ws.length ? ws[Math.floor(ws.length / 2)] : null;
+  const iqr = ws.length > 3 ? ws[Math.floor(ws.length * 0.75)] - ws[Math.floor(ws.length * 0.25)] : Infinity;
+  const useTracked = wMed && iqr / wMed < 0.05;
+  const widthPx = useTracked ? wMed : seedWidth;
+  const extra = {
     rejected: VF.rejected, src: 'file', fileName: VF.name,
     vertRef: VF.vertSet ? vertRefDeg() : null,
-    refTracked: rolls.length, refLost: VF.refLost, camRoll,
+    refTracked: rolls.length, refLost: VF.refLost, camRoll, widthPx,
+    widthSrc: useTracked ? 'tracked' : 'seed', widthIqr: isFinite(iqr) ? iqr : null,
     durMs: S.length ? S[S.length - 1].t - S[0].t : 0,
-  });
+  };
+  /* 偏芯: 同じ画面の中で「杭の中心線」と「設計芯」の距離を測るので、
+     カメラが動いても相対量は変わらない（補正が要らない）。
+     mm への換算は杭径÷見かけの幅。 */
+  const dia = capTarget.pile.dia;
+  if (VF.designPt && widthPx && dia > 0) {
+    const cx = med(S.map(s => s.cx));
+    if (cx !== null) {
+      const mmpx = dia / widthPx;
+      extra.eccPx = cx - VF.designPt.x;
+      extra.eccMm = extra.eccPx * mmpx;
+      extra.mmPerPx = mmpx;
+      const cs = S.map(s => s.cx).filter(v => v !== null);
+      const m = cs.reduce((a, b) => a + b, 0) / cs.length;
+      extra.eccSd = Math.sqrt(cs.reduce((a, b) => a + (b - m) ** 2, 0) / cs.length) * mmpx;
+    }
+  }
+  VF.result = buildViewFromSamples(S, workCv.width, extra);
   $('#vf-live').style.display = 'none';
   $('#vf-result').style.display = 'block';
   const span = (S[S.length - 1].t - S[0].t) / 1000;
-  $('#vf-rmsg').innerHTML = resultHTML(VF.result) +
+  const r = VF.result;
+  const eccHTML = r.eccMm === undefined ? '' :
+    '<div style="margin-top:6px;padding-top:6px;border-top:1px solid var(--line)">' +
+    '<b style="font-size:16px">偏芯 ' + (r.eccMm >= 0 ? '右へ ' : '左へ ') + fmt(Math.abs(r.eccMm), 0) + ' mm</b>' +
+    '<span style="color:var(--dim);font-size:11px"> （この視点の1成分）</span><br>' +
+    '<span style="color:var(--dim);font-size:11px">見かけの幅 ' + fmt(r.widthPx, 1) + 'px' +
+    (r.widthSrc === 'seed' ? '（指定したエッジ間隔）' : '（追跡値）') + ' = φ' +
+    capTarget.pile.dia + 'mm → ' + fmt(r.mmPerPx, 3) + ' mm/px　ばらつき ±' + fmt(r.eccSd, 1) + 'mm</span></div>';
+  $('#vf-rmsg').innerHTML = resultHTML(VF.result) + eccHTML +
     '<div style="color:var(--dim);font-size:11px;margin-top:4px">' +
     fmt(span, 1) + '秒ぶんを ' + VF.rate + '倍速で解析（実効 ' + fmt(S.length / (span || 1), 1) + ' fps）<br>' +
     (VF.vertSet
