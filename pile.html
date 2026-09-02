@@ -116,6 +116,8 @@
   /* ---------- fullscreen overlays ---------- */
   .fs { position:fixed; inset:0; z-index:200; background:#000; display:none; flex-direction:column; }
   .fs.on { display:flex; }
+  /* エッジ指定は他の全画面(カメラ・動画)の上に重ねて開くため一段上に置く */
+  #mark { z-index:300; }
   .fs-top {
     padding:calc(10px + env(safe-area-inset-top)) 14px 10px;
     background:rgba(0,0,0,.75); display:flex; align-items:center; gap:12px; font-size:13px;
@@ -338,6 +340,40 @@
     <button class="btn primary" id="mark-ok" disabled>この計測を確定</button>
   </div>
 </div>
+
+<!-- ============ 動画ファイルから計測 ============ -->
+<div class="fs" id="vfile">
+  <div class="fs-top">
+    <button class="x" id="vf-close">&times;</button>
+    <div><div id="vf-title" style="font-weight:700">動画から計測</div>
+         <div id="vf-sub" style="font-size:11px;color:#8b949e">-</div></div>
+  </div>
+  <div class="fs-stage" id="vf-stage">
+    <video id="vf-video" playsinline muted></video>
+    <canvas id="vf-overlay"></canvas>
+  </div>
+  <div class="fs-bot">
+    <div id="vf-live">
+      <div class="tapmsg" id="vf-msg"></div>
+      <div class="progwrap"><div class="prog" id="vf-prog"></div></div>
+      <div style="display:flex;gap:8px">
+        <button class="btn" id="vf-vert" style="flex:1">① 鉛直基準</button>
+        <button class="btn" id="vf-edges" style="flex:1">② エッジ</button>
+        <button class="btn" id="vf-rate" style="flex:0 0 62px">4倍</button>
+        <button class="btn primary" id="vf-run" style="flex:1" disabled>③ 解析</button>
+      </div>
+    </div>
+    <div id="vf-result" style="display:none">
+      <div class="tapmsg" id="vf-rmsg"></div>
+      <canvas class="spark" id="vf-spark"></canvas>
+      <div style="display:flex;gap:10px;margin-top:10px">
+        <button class="btn" id="vf-retry" style="flex:0 0 100px">やり直す</button>
+        <button class="btn primary" id="vf-save" style="flex:1">この計測を確定</button>
+      </div>
+    </div>
+  </div>
+</div>
+<input type="file" id="vf-input" accept="video/*" style="display:none">
 
 <div class="toast" id="toast"></div>
 <div class="rotwarn" id="rotwarn"><div><div style="font-size:40px;margin-bottom:14px">📱</div><b>縦持ちでご使用ください</b><div class="hint" style="margin-top:8px">画面を回転させると計測の基準がずれます</div></div></div>
@@ -787,8 +823,10 @@ function renderStepBody(p) {
             (v.mode === 'cont' ? '　<span style="color:var(--dim)">連続 ' + v.n + '点 ±' + fmt(v.sd, 3) + '°</span>' : '　<span style="color:var(--dim)">単発</span>')
           : '未計測') + '</div>' +
       '</div>' +
-      '<button class="mini">' + (v ? '撮り直す' : '撮影') + '</button>';
-    row.querySelector('button').addEventListener('click', () => startCapture(p, curStep, k));
+      '<button class="mini" data-act="cam">' + (v ? '撮り直す' : '撮影') + '</button>' +
+      '<button class="mini" data-act="vid">動画</button>';
+    row.querySelector('[data-act="cam"]').addEventListener('click', () => startCapture(p, curStep, k));
+    row.querySelector('[data-act="vid"]').addEventListener('click', () => openVideoFile(p, curStep, k));
     card.appendChild(row);
     if (v && v.imgKey) {
       const img = row.querySelector('img');
@@ -1227,8 +1265,14 @@ function startContinuous() {
 
 function pump() {
   const v = $('#cam-video');
-  const step = () => {
+  let lastMediaTime = -1;
+  /* requestVideoFrameCallback は同じフレームに対して複数回呼ばれることがある。
+     重複を数えるとサンプルが相関し、平均の標準誤差を実際より小さく見せてしまう。
+     mediaTime が同じフレームは読み飛ばす。 */
+  const step = (meta) => {
     if (!Cont.running) return;
+    if (meta && meta.mediaTime === lastMediaTime) { schedule(); return; }
+    if (meta) lastMediaTime = meta.mediaTime;
     const now = performance.now();
     const el = now - Cont.t0;
 
@@ -1256,8 +1300,8 @@ function pump() {
     schedule();
   };
   const schedule = () => {
-    if (v.requestVideoFrameCallback) v.requestVideoFrameCallback(() => step());
-    else Cont.raf = requestAnimationFrame(() => step());
+    if (v.requestVideoFrameCallback) v.requestVideoFrameCallback((t, meta) => step(meta));
+    else Cont.raf = requestAnimationFrame(() => step(null));
   };
   schedule();
 }
@@ -1270,6 +1314,23 @@ function stats(a) {
   return { n, mean, sd, sem: n > 1 ? sd / Math.sqrt(n) : 0 };
 }
 
+/* フレーム列 → 1視点ぶんの計測値。ライブ・動画ファイルの両方から使う */
+function buildViewFromSamples(S, imgW, extra) {
+  const st = stats(S.map(s => s.angle));
+  const midX = S.reduce((a, s) => a + s.midX, 0) / S.length;
+  const offset = (midX - imgW / 2) / imgW;
+  const f = (imgW / 2) / Math.tan((DB.settings.hfov * D2R) / 2);
+  return Object.assign({
+    angle: st.mean, tan: Math.tan(st.mean * D2R),
+    edgeDiff: S.reduce((a, s) => a + s.edgeDiff, 0) / S.length,
+    offset, perspErr: Math.abs((offset * imgW) / f) * (1 / DB.settings.tiltN) * R2D,
+    pitch: S.reduce((a, s) => a + s.pitch, 0) / S.length,
+    roll: 0, stab: null,
+    mode: 'cont', n: st.n, sd: st.sd, sem: st.sem,
+    series: downsample(S, 160), pts: [], at: Date.now(),
+  }, extra || {});
+}
+
 function finishContinuous() {
   Cont.running = false;
   const S = Cont.samples;
@@ -1279,22 +1340,10 @@ function finishContinuous() {
     $('#cont-prog').style.width = '0';
     return;
   }
-  const st = stats(S.map(s => s.angle));
-  const midX = S.reduce((a, s) => a + s.midX, 0) / S.length;
-  const offset = (midX - workCv.width / 2) / workCv.width;
-  const f = (workCv.width / 2) / Math.tan((DB.settings.hfov * D2R) / 2);
-  const perspErr = Math.abs((offset * workCv.width) / f) * (1 / DB.settings.tiltN) * R2D;
-
-  Cont.result = {
-    angle: st.mean, tan: Math.tan(st.mean * D2R),
-    edgeDiff: S.reduce((a, s) => a + s.edgeDiff, 0) / S.length,
-    offset, perspErr,
-    pitch: S.reduce((a, s) => a + s.pitch, 0) / S.length,
+  Cont.result = buildViewFromSamples(S, workCv.width, {
     roll: Sensor.rollDeg, stab: Sensor.stabilityDeg,
-    mode: 'cont', n: st.n, sd: st.sd, sem: st.sem,
-    rejected: Cont.rejected, durMs: Cont.dur,
-    series: downsample(S, 160), pts: [], at: Date.now(),
-  };
+    rejected: Cont.rejected, durMs: Cont.dur, src: 'live',
+  });
   showContResult();
 }
 
@@ -1308,22 +1357,22 @@ function downsample(S, max) {
   return out;
 }
 
-function showContResult() {
-  const r = Cont.result;
-  $('#cont-live').style.display = 'none';
-  $('#cont-result').style.display = 'block';
+function resultHTML(r) {
   const ratio = Math.abs(r.tan) > 1e-9 ? fmt(1 / Math.abs(r.tan), 0) : '∞';
-  $('#cont-rmsg').innerHTML =
-    '<b style="font-size:17px">' + (r.angle >= 0 ? '右へ ' : '左へ ') + fmt(Math.abs(r.angle), 3) +
+  return '<b style="font-size:17px">' + (r.angle >= 0 ? '右へ ' : '左へ ') + fmt(Math.abs(r.angle), 3) +
     '°　1/' + ratio + '</b><br>' +
     '<span style="color:var(--dim);font-size:12px">' + r.n + 'フレーム　ばらつき 1σ=' + fmt(r.sd, 3) +
     '°　平均の標準誤差 ±' + fmt(r.sem, 4) + '°' + (r.rejected ? '　除外 ' + r.rejected : '') + '</span>';
-  drawSpark(r);
+}
+function showContResult() {
+  $('#cont-live').style.display = 'none';
+  $('#cont-result').style.display = 'block';
+  $('#cont-rmsg').innerHTML = resultHTML(Cont.result);
+  drawSpark($('#cont-spark'), Cont.result);
 }
 
 /* 傾斜の時系列。首振りの振幅がそのまま波形として見える */
-function drawSpark(r) {
-  const cv = $('#cont-spark');
+function drawSpark(cv, r) {
   const w = cv.clientWidth || 320, h = 44;
   cv.width = w * (window.devicePixelRatio || 1);
   cv.height = h * (window.devicePixelRatio || 1);
@@ -1422,21 +1471,41 @@ $('#cont-save').addEventListener('click', async () => {
    エッジ指定（ルーペ付き）
    ========================================================= */
 let markImg = null, markGrav = null, markPts = [], markScale = 1, markOff = { x: 0, y: 0 };
-const MARK_GUIDE = [
+const MARK_EDGE_GUIDE = [
   '<b>左</b>エッジの<b>上</b>を長押しで合わせる',
   '<b>左</b>エッジの<b>下</b>（できるだけ離して）',
   '<b>右</b>エッジの<b>上</b>',
   '<b>右</b>エッジの<b>下</b>（できるだけ離して）',
 ];
+const MARK_VERT_GUIDE = [
+  '<b>鉛直と分かる物</b>の<b>上</b>を長押しで合わせる',
+  '同じ物の<b>下</b>（できるだけ離して）',
+];
+let markOpts = null;
 
-function openMark(canvas, grav) {
+/* opts: { n, guide[], title, sub, preview(pts), onDone(pts) }
+   省略時は従来どおり「4点でエッジ指定 → 計測を保存」 */
+function openMark(canvas, grav, opts) {
   markImg = canvas; markGrav = grav; markPts = [];
-  $('#mark-title').textContent = '視点' + capTarget.view + ' — エッジを指定';
-  $('#mark-sub').textContent = capTarget.pile.no + ' / ' + stepName(capTarget.step);
+  markOpts = Object.assign({
+    n: 4, guide: MARK_EDGE_GUIDE,
+    title: '視点' + capTarget.view + ' — エッジを指定',
+    sub: capTarget.pile.no + ' / ' + stepName(capTarget.step),
+    preview: pts => livePreview(pts),
+    onDone: async pts => {
+      const view = buildView(pts, markGrav, markImg.width);
+      const img = markImg;
+      closeMark();
+      await saveView(view, img);
+    },
+  }, opts || {});
+  $('#mark-title').innerHTML = markOpts.title;
+  $('#mark-sub').innerHTML = markOpts.sub;
   $('#mark').classList.add('on');
   requestAnimationFrame(() => { fitMark(); drawMark(); });
 }
-$('#mark-close').addEventListener('click', () => { $('#mark').classList.remove('on'); markImg = null; });
+function closeMark() { $('#mark').classList.remove('on'); markImg = null; markOpts = null; }
+$('#mark-close').addEventListener('click', closeMark);
 $('#mark-undo').addEventListener('click', () => { markPts.pop(); drawMark(); });
 
 function fitMark() {
@@ -1472,7 +1541,7 @@ function drawMark() {
     c.beginPath(); c.moveTo(d.x - 15, d.y); c.lineTo(d.x + 15, d.y);
     c.moveTo(d.x, d.y - 15); c.lineTo(d.x, d.y + 15); c.stroke();
   });
-  [[0, 1, '#f97316'], [2, 3, '#3fb950']].forEach(([a, b, col]) => {
+  [[0, 1, '#58a6ff'], [2, 3, '#3fb950']].forEach(([a, b, col]) => {
     if (markPts[a] && markPts[b]) {
       const p1 = toDisp(markPts[a]), p2 = toDisp(markPts[b]);
       c.strokeStyle = col; c.lineWidth = 2;
@@ -1480,14 +1549,15 @@ function drawMark() {
     }
   });
 
-  $('#mark-msg').innerHTML = markPts.length < 4
-    ? '(' + (markPts.length + 1) + '/4) ' + MARK_GUIDE[markPts.length]
-    : livePreview();
-  $('#mark-ok').disabled = markPts.length < 4;
+  const N = markOpts ? markOpts.n : 4;
+  $('#mark-msg').innerHTML = markPts.length < N
+    ? '(' + (markPts.length + 1) + '/' + N + ') ' + markOpts.guide[markPts.length]
+    : markOpts.preview(markPts);
+  $('#mark-ok').disabled = markPts.length < N;
 }
 
-function livePreview() {
-  const v = buildView(markPts, markGrav, markImg.width);
+function livePreview(pts) {
+  const v = buildView(pts, markGrav, markImg.width);
   let s = (v.angle >= 0 ? '右へ ' : '左へ ') + fmt(Math.abs(v.angle), 3) + '°　1/' +
           (Math.abs(v.tan) > 1e-9 ? fmt(1 / Math.abs(v.tan), 0) : '∞');
   if (v.edgeDiff > 0.4) s += '　<span style="color:var(--warn)">左右エッジ差 ' + fmt(v.edgeDiff, 2) + '° 大</span>';
@@ -1524,7 +1594,7 @@ function livePreview() {
     loupe.classList.add('on');
   }
   function down(e) {
-    if (!markImg || markPts.length >= 4) return;
+    if (!markImg || markPts.length >= (markOpts ? markOpts.n : 4)) return;
     e.preventDefault(); active = true; cur = pos(e); showLoupe(cur);
   }
   function move(e) { if (!active) return; e.preventDefault(); cur = pos(e); showLoupe(cur); }
@@ -1565,12 +1635,243 @@ async function saveView(view, srcCanvas) {
 }
 
 $('#mark-ok').addEventListener('click', async () => {
-  if (markPts.length < 4) return;
-  const view = buildView(markPts, markGrav, markImg.width);
-  const img = markImg;
-  $('#mark').classList.remove('on'); markImg = null;
-  await saveView(view, img);
+  if (!markOpts || markPts.length < markOpts.n) return;
+  await markOpts.onDone(markPts.slice());
 });
+
+/* =========================================================
+   動画ファイルから計測（据置きカメラ用）
+
+   固定カメラには IMU が無いが、カメラが動かないので
+   鉛直の基準はクリップ全体で1回決めれば足りる。
+   下げ振り・水準器で立てたポール・建物の柱など、鉛直と分かる
+   物を画角に入れておき、その1本を指定する。
+   （水平に据えたことが確かなら画像の鉛直をそのまま使う）
+
+   1台しか据えられない場合、得られるのは視線に直交する1成分だけ。
+   合成傾斜は求まらないので、これは「トレンド監視」用であり、
+   2軸の確定値はスマホの直交2視点で取る。
+   ========================================================= */
+
+const VF = {
+  url: null, name: '', grav: { gx: 0, gy: -1, gz: 0 }, vertSet: false, edgesSet: false,
+  seed: null, samples: [], rejected: 0, running: false, result: null, model: null, rate: 4,
+};
+
+function openVideoFile(pile, step, view) {
+  capTarget = { pile, step, view };
+  $('#vf-input').value = '';
+  $('#vf-input').click();
+}
+
+$('#vf-input').addEventListener('change', async e => {
+  const f = e.target.files && e.target.files[0];
+  if (!f) return;
+  if (!capTarget) { toast('杭と視点を選んでから動画を読み込んでください'); return; }
+  if (VF.url) URL.revokeObjectURL(VF.url);
+  VF.url = URL.createObjectURL(f); VF.name = f.name;
+  Object.assign(VF, { vertSet: false, edgesSet: false, result: null, samples: [], rejected: 0, model: null });
+  VF.grav = { gx: 0, gy: -1, gz: 0 };
+
+  const v = $('#vf-video');
+  v.src = VF.url;
+  $('#vf-title').textContent = '視点' + capTarget.view + ' — 動画から計測';
+  $('#vf-sub').textContent = capTarget.pile.no + ' / ' + stepName(capTarget.step) + ' / ' + f.name;
+  $('#vfile').classList.add('on');
+  $('#vf-live').style.display = 'block';
+  $('#vf-result').style.display = 'none';
+  $('#vf-prog').style.width = '0';
+  $('#vf-rate').textContent = VF.rate + '倍';
+  vfMsg();
+
+  try {
+    await new Promise((res, rej) => {
+      v.onloadeddata = res; v.onerror = () => rej(new Error('decode'));
+      setTimeout(() => rej(new Error('timeout')), 15000);
+    });
+    const dur = isFinite(v.duration) ? v.duration : 0;
+    VF.seed = await grabFrame(dur > 0 ? Math.min(0.5, dur * 0.05) : 0.1);
+  } catch (err) {
+    toast('この動画を読み込めませんでした'); closeVideo();
+  }
+});
+
+function grabFrame(t) {
+  const v = $('#vf-video');
+  return new Promise(res => {
+    const done = () => {
+      const cv = document.createElement('canvas');
+      cv.width = v.videoWidth; cv.height = v.videoHeight;
+      cv.getContext('2d').drawImage(v, 0, 0);
+      res(cv);
+    };
+    const target = isFinite(t) && t >= 0 ? t : 0;
+    if (Math.abs(v.currentTime - target) < 0.01 && v.readyState >= 2) { done(); return; }
+    v.onseeked = () => { v.onseeked = null; done(); };
+    v.currentTime = target;
+  });
+}
+
+function vfMsg() {
+  const parts = [];
+  parts.push(VF.vertSet ? '① 鉛直基準 ✓（' + fmt(vertRefDeg(), 2) + '°）'
+                        : '① 鉛直基準 — 未設定（画像の鉛直を使用中）');
+  parts.push(VF.edgesSet ? '② エッジ ✓' : '② エッジ — 未設定');
+  $('#vf-msg').innerHTML = parts.join('　/　');
+  $('#vf-run').disabled = !VF.edgesSet || VF.running;
+}
+function vertRefDeg() { return Math.atan2(VF.grav.gx, -VF.grav.gy) * R2D; }
+
+/* 鉛直基準: 画角内の鉛直な物を2点で指定する */
+$('#vf-vert').addEventListener('click', () => {
+  if (!VF.seed) return;
+  openMark(VF.seed, { gx: 0, gy: -1, gz: 0 }, {
+    n: 2, guide: MARK_VERT_GUIDE,
+    title: '鉛直の基準を指定',
+    sub: '下げ振り・水準器で立てたポール・建物の柱など',
+    preview: pts => {
+      const d = Math.atan2(pts[1].x - pts[0].x, -(pts[1].y - pts[0].y)) * R2D;
+      return '画像の鉛直から <b>' + fmt(Math.abs(d) > 90 ? 180 - Math.abs(d) : Math.abs(d), 3) + '°</b> 傾いています';
+    },
+    onDone: pts => {
+      // 上向きに揃えた方向ベクトルを「真の上」として重力ベクトルに変換する
+      let ux = pts[1].x - pts[0].x, uy = -(pts[1].y - pts[0].y);
+      if (uy < 0) { ux = -ux; uy = -uy; }
+      const n = Math.hypot(ux, uy) || 1;
+      VF.grav = { gx: -ux / n, gy: -uy / n, gz: 0 };
+      VF.vertSet = true;
+      closeMark(); vfMsg();
+    },
+  });
+});
+
+/* 杭の左右エッジを4点で指定して追跡の初期値にする */
+$('#vf-edges').addEventListener('click', () => {
+  if (!VF.seed) return;
+  openMark(VF.seed, VF.grav, {
+    n: 4, guide: MARK_EDGE_GUIDE,
+    title: '杭の左右エッジを指定',
+    sub: '追跡の初期位置になります',
+    preview: pts => livePreview(pts),
+    onDone: pts => {
+      const ym = VF.seed.height / 2;
+      const at = (a, b) => a.x + (b.x - a.x) * ((ym - a.y) / ((b.y - a.y) || 1));
+      Guides.L = at(pts[0], pts[1]); Guides.R = at(pts[2], pts[3]);
+      if (Guides.L > Guides.R) { const t = Guides.L; Guides.L = Guides.R; Guides.R = t; }
+      Guides.ready = true; VF.edgesSet = true;
+      closeMark(); vfMsg();
+    },
+  });
+});
+
+$('#vf-rate').addEventListener('click', () => {
+  const seq = [1, 2, 4, 8];
+  VF.rate = seq[(seq.indexOf(VF.rate) + 1) % seq.length];
+  $('#vf-rate').textContent = VF.rate + '倍';
+});
+$('#vf-run').addEventListener('click', () => VF.running ? stopVideoRun() : runVideo());
+$('#vf-retry').addEventListener('click', () => {
+  VF.result = null;
+  $('#vf-live').style.display = 'block';
+  $('#vf-result').style.display = 'none';
+  $('#vf-prog').style.width = '0';
+  vfMsg();
+});
+$('#vf-save').addEventListener('click', async () => {
+  if (!VF.result) return;
+  const seed = VF.seed;
+  closeVideo();
+  await saveView(VF.result, seed);
+});
+$('#vf-close').addEventListener('click', closeVideo);
+
+function closeVideo() {
+  stopVideoRun();
+  const v = $('#vf-video');
+  v.pause(); v.removeAttribute('src'); v.load();
+  if (VF.url) { URL.revokeObjectURL(VF.url); VF.url = null; }
+  $('#vfile').classList.remove('on');
+}
+function stopVideoRun() {
+  VF.running = false;
+  $('#vf-video').pause();
+  $('#vf-run').textContent = '③ 解析';
+}
+
+async function runVideo() {
+  const v = $('#vf-video');
+  if (!v.videoWidth) { toast('動画の準備中です'); return; }
+  workCv.width = v.videoWidth; workCv.height = v.videoHeight;
+  workCtx = workCv.getContext('2d', { willReadFrequently: true });
+  workCtx.drawImage(VF.seed, 0, 0);
+  calibratePolarity(workCtx);
+
+  Object.assign(VF, { running: true, samples: [], rejected: 0, model: null });
+  $('#vf-run').textContent = '中止';
+  $('#vf-run').disabled = false;
+  v.currentTime = 0;
+  v.playbackRate = VF.rate;
+  v.onended = () => { if (VF.running) { VF.running = false; finishVideo(); } };
+  try { await v.play(); } catch (e) { toast('再生できませんでした'); stopVideoRun(); return; }
+
+  let lastMediaTime = -1;
+  const step = (meta) => {
+    if (!VF.running) { finishVideo(); return; }
+    // 同じフレームを二重に数えない（標準誤差を過小に見せないため）
+    if (meta && meta.mediaTime === lastMediaTime) {
+      if (v.ended) { VF.running = false; finishVideo(); return; }
+      schedule(); return;
+    }
+    if (meta) lastMediaTime = meta.mediaTime;
+    workCtx.drawImage(v, 0, 0);
+    const f = trackFrame(workCtx, VF.grav, VF.model);
+    if (f) {
+      VF.model = { L: f.L, R: f.R };
+      VF.samples.push({ t: v.currentTime * 1000, angle: f.angle,
+                        edgeDiff: Math.abs(f.angleL - f.angleR), midX: f.midX, pitch: 0 });
+    } else { VF.rejected++; VF.model = null; }
+
+    if (isFinite(v.duration) && v.duration > 0)
+      $('#vf-prog').style.width = clamp(v.currentTime / v.duration * 100, 0, 100) + '%';
+    if (VF.samples.length) {
+      const st = stats(VF.samples.map(x => x.angle));
+      $('#vf-msg').innerHTML = '解析中 ' + VF.samples.length + '点　' +
+        (st.mean >= 0 ? '右 ' : '左 ') + fmt(Math.abs(st.mean), 3) + '° ±' + fmt(st.sd, 3) +
+        (VF.rejected ? '　<span style="color:var(--dim)">除外 ' + VF.rejected + '</span>' : '');
+    }
+    if (v.ended) { VF.running = false; finishVideo(); return; }
+    schedule();
+  };
+  const schedule = () => {
+    if (v.requestVideoFrameCallback) v.requestVideoFrameCallback((t, meta) => step(meta));
+    else requestAnimationFrame(() => step(null));
+  };
+  schedule();
+}
+
+function finishVideo() {
+  stopVideoRun();
+  const S = VF.samples;
+  if (S.length < 20) {
+    $('#vf-msg').innerHTML = '<span style="color:var(--ng)">エッジを追跡できませんでした（' + S.length +
+      '点）。エッジの指定をやり直すか、背景とのコントラストが取れる画角で撮り直してください。</span>';
+    return;
+  }
+  VF.result = buildViewFromSamples(S, workCv.width, {
+    rejected: VF.rejected, src: 'file', fileName: VF.name,
+    vertRef: VF.vertSet ? vertRefDeg() : null,
+    durMs: S.length ? S[S.length - 1].t - S[0].t : 0,
+  });
+  $('#vf-live').style.display = 'none';
+  $('#vf-result').style.display = 'block';
+  const span = (S[S.length - 1].t - S[0].t) / 1000;
+  $('#vf-rmsg').innerHTML = resultHTML(VF.result) +
+    '<div style="color:var(--dim);font-size:11px;margin-top:4px">' +
+    fmt(span, 1) + '秒ぶんを ' + VF.rate + '倍速で解析（実効 ' + fmt(S.length / (span || 1), 1) + ' fps）<br>' +
+    (VF.vertSet ? '鉛直基準を指定（画像の鉛直から ' + fmt(vertRefDeg(), 2) + '°）'
+                : '画像の鉛直を使用（カメラが水平に据えられている前提）') + '</div>';
+  drawSpark($('#vf-spark'), VF.result);
+}
 
 /* =========================================================
    記録
