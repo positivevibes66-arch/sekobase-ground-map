@@ -257,6 +257,18 @@
   </div>
 
   <div class="card">
+    <h2 style="margin-top:0">逃げ棒</h2>
+    <div class="hint" style="margin-bottom:10px">杭芯セットで実測する2本の呼び名。偏芯も傾斜もこの2軸で記録します。</div>
+    <div class="row">
+      <label class="f"><span>逃げ棒1の呼び名</span><input id="s-rod1" value="X通り"></label>
+      <label class="f"><span>逃げ棒2の呼び名</span><input id="s-rod2" value="Y通り"></label>
+    </div>
+    <label class="f"><span>2本の成す角 (°)　※直交なら90</span>
+      <input id="s-rodang" type="number" inputmode="decimal" step="1" value="90"></label>
+    <button class="btn" id="s-rodsave">保存</button>
+  </div>
+
+  <div class="card">
     <h2 style="margin-top:0">センサー状態</h2>
     <table class="kv"><tbody id="s-sensor"></tbody></table>
     <div style="height:10px"></div>
@@ -418,7 +430,8 @@ const LS_KEY = 'sekobase_pile_v1';
 let DB = {
   piles: [],
   meas: [],
-  settings: { tiltN: 100, eccMax: 100, pitchTol: 1.0, hfov: 65 },
+  settings: { tiltN: 100, eccMax: 100, pitchTol: 1.0, hfov: 65,
+              rod1: 'X通り', rod2: 'Y通り', rodAngle: 90 },
   selPile: null,
 };
 function saveDB() { try { localStorage.setItem(LS_KEY, JSON.stringify(DB)); } catch (e) { toast('保存に失敗しました'); } }
@@ -658,6 +671,18 @@ function extrapolate(ecc, tilt, dh_m) {
   return { hA, hB, mag: Math.hypot(hA, hB), dh_m };
 }
 
+/* 2方向の成分から合成量を出す。逃げ棒が直交していない現場でも正しく合成する。
+   d1, d2 はそれぞれの方向への射影（テープの伸縮量そのもの）。
+   直交していれば単純な √(d1²+d2²)。 */
+function vecMag(d1, d2, angDeg) {
+  const th = (angDeg || 90) * D2R;
+  if (Math.abs(angDeg - 90) < 0.01) return Math.hypot(d1, d2);
+  const sn = Math.sin(th);
+  if (Math.abs(sn) < 1e-6) return Math.abs(d1);
+  return Math.hypot(d1, (d2 - d1 * Math.cos(th)) / sn);
+}
+const eccMag = (a, b) => vecMag(a, b, DB.settings.rodAngle);
+
 /* 偏芯の許容値 = min(D/4, 上限) */
 function eccAllow(diaMm) {
   const a = (diaMm || 0) / 4;
@@ -682,6 +707,21 @@ function commitMeas(m) {
 }
 function measTilt(m) { return m ? composeTilt(m.A, m.B) : null; }
 
+/* 逃げ棒からの実測値を、杭芯セット時との差（＝偏芯）に直す。
+
+   現場では杭芯セットで逃げ棒2本からテープを張って 0.0 に合わせている。
+   だから設計距離を知らなくても、そのときの読みを原点にすれば
+   あとは読みの差がそのまま偏芯になる。
+   符号は「逃げ棒から遠ざかる向きが＋」。 */
+function eccOffsets(pileId, m) {
+  if (!m || !m.ecc) return null;
+  if (m.ecc.mode === 'offset') return { eA: m.ecc.eA, eB: m.ecc.eB, origin: null };
+  const so = getMeas(pileId, 'setout');
+  const o = so && so.ecc && so.ecc.r1 !== undefined ? so.ecc : null;
+  if (!o) return null;
+  return { eA: m.ecc.r1 - o.r1, eB: m.ecc.r2 - o.r2, origin: o };
+}
+
 function pileSummary(pileId) {
   const p = getPile(pileId);
   if (!p) return null;
@@ -691,11 +731,12 @@ function pileSummary(pileId) {
   const joint = jointAngle(byStep.preweld && byStep.preweld.tilt, byStep.postweld && byStep.postweld.tilt);
   let head = null, absEcc = null;
   if (fin && fin.tilt && fin.meas.ecc) {
-    const so = getMeas(pileId, 'setout');
-    const base = (fin.meas.ecc.basis === 'move' && so && so.ecc) ? so.ecc : { eA: 0, eB: 0 };
-    absEcc = { eA: fin.meas.ecc.eA + base.eA, eB: fin.meas.ecc.eB + base.eB };
-    const dh = (fin.meas.ecc.measH || 0) + (p.headDepth || 0);
-    head = extrapolate(absEcc, fin.tilt, dh);
+    absEcc = eccOffsets(pileId, fin.meas);
+    if (absEcc) {
+      const dh = (fin.meas.ecc.measH || 0) + (p.headDepth || 0);
+      head = extrapolate(absEcc, fin.tilt, dh);
+      head.mag = eccMag(head.hA, head.hB);
+    }
   }
   return { pile: p, byStep, joint, head, absEcc, allow: eccAllow(p.dia) };
 }
@@ -907,8 +948,7 @@ function fmtSigned(t) {
 
 /* 軸の呼び方。傾斜センサーで測ったときは現場の通り芯 X/Y、
    カメラで測ったときは撮影した2視点。偏芯の入力も同じ軸で揃える。 */
-const axisNames = m => (m && ((m.A && m.A.mode === 'sensor') || (m.B && m.B.mode === 'sensor')))
-  ? ['X方向', 'Y方向'] : ['視点A', '視点B'];
+const axisNames = () => [DB.settings.rod1, DB.settings.rod2];
 
 const hasVideoEcc = m => ['A', 'B'].some(k => m[k] && m[k].eccMm !== undefined);
 function videoEccLabel(m) {
@@ -976,106 +1016,137 @@ function buildSensorCard(p, m) {
 
 function buildEccCard(p, m, tilt) {
   const c = document.createElement('div'); c.className = 'card';
-  const e = m.ecc || { eA: '', eB: '', measH: '', basis: 'abs' };
-  const ax = axisNames(m);
+  const ax = axisNames();
   const isSetout = curStep === 'setout';
-  const setoutMeas = getMeas(p.id, 'setout');
-  const setoutEcc = setoutMeas && setoutMeas.ecc ? setoutMeas.ecc : null;
+  const so = getMeas(p.id, 'setout');
+  const origin = so && so.ecc && so.ecc.r1 !== undefined ? so.ecc : null;
+  const e = m.ecc || {};
+  const mode = e.mode || (isSetout ? 'rods' : (origin ? 'rods' : 'offset'));
+  const v = k => (e[k] === undefined || e[k] === null) ? '' : e[k];
+
+  const rodInputs =
+    '<div class="row">' +
+      '<label class="f"><span>' + esc(ax[0]) + ' の実測 (mm)</span>' +
+        '<input id="e-r1" type="number" inputmode="decimal" value="' + v('r1') + '"></label>' +
+      '<label class="f"><span>' + esc(ax[1]) + ' の実測 (mm)</span>' +
+        '<input id="e-r2" type="number" inputmode="decimal" value="' + v('r2') + '"></label>' +
+    '</div>';
+  const offsetInputs =
+    '<div class="row">' +
+      '<label class="f"><span>' + esc(ax[0]) + ' のズレ (mm)</span>' +
+        '<input id="e-a" type="number" inputmode="decimal" value="' + v('eA') + '"></label>' +
+      '<label class="f"><span>' + esc(ax[1]) + ' のズレ (mm)</span>' +
+        '<input id="e-b" type="number" inputmode="decimal" value="' + v('eB') + '"></label>' +
+    '</div>';
 
   c.innerHTML =
-    '<h2 style="margin-top:0">' + (isSetout ? '杭芯セットの残差' : '偏芯の実測') + '</h2>' +
+    '<h2 style="margin-top:0">' + (isSetout ? '杭芯セット — 逃げ棒の実測' : '偏芯の実測') + '</h2>' +
     '<div class="hint" style="margin-bottom:12px">' + (isSetout
-      ? '逃げ杭から実測して<b>0.0に合わせた</b>あと、残っているズレを入れてください。合わせ切れていれば 0 のままで構いません。ここが以後の偏芯の原点になります。'
-      : '設計芯からのズレを<b>傾斜と同じ2方向</b>で入力してください。符号は<b>通り芯の＋方向へずれているとき＋</b>です。') +
+      ? '逃げ棒2本から測った値を、<b>0.0に合わせた状態で</b>そのまま入れてください。' +
+        '設計距離は要りません。<b>この読みが以後の原点</b>になります。'
+      : (mode === 'rods'
+        ? '杭芯セットと<b>同じ測り方</b>で逃げ棒2本から測った値を入れてください。' +
+          '読みの差がそのまま偏芯になります。符号は<b>逃げ棒から遠ざかる向きが＋</b>。'
+        : '設計芯からのズレを直接入れてください。符号は<b>逃げ棒から遠ざかる向きが＋</b>。')) +
     '</div>' +
-    (isSetout ? '' :
-      '<label class="f"><span>入力する値</span><select id="e-basis">' +
-        '<option value="abs"' + (e.basis !== 'move' ? ' selected' : '') + '>逃げ杭から再実測した絶対量</option>' +
-        '<option value="move"' + (e.basis === 'move' ? ' selected' : '') + '>杭芯セット時からの移動量</option>' +
-      '</select></label>') +
-    '<div class="row">' +
-      '<label class="f"><span>' + ax[0] + ' (mm)</span><input id="e-a" type="number" inputmode="decimal" value="' + e.eA + '"></label>' +
-      '<label class="f"><span>' + ax[1] + ' (mm)</span><input id="e-b" type="number" inputmode="decimal" value="' + e.eB + '"></label>' +
-    '</div>' +
-    (isSetout ? '' :
+    (isSetout ? rodInputs :
+      '<label class="f"><span>入力の仕方</span><select id="e-mode">' +
+        '<option value="rods"' + (mode === 'rods' ? ' selected' : '') + (origin ? '' : ' disabled') +
+          '>逃げ棒からの実測' + (origin ? '' : '（杭芯セット未記録のため選べません）') + '</option>' +
+        '<option value="offset"' + (mode === 'offset' ? ' selected' : '') + '>ズレ量を直接入力</option>' +
+      '</select></label>' +
+      '<div id="e-rods" style="display:' + (mode === 'rods' ? 'block' : 'none') + '">' + rodInputs + '</div>' +
+      '<div id="e-offs" style="display:' + (mode === 'rods' ? 'none' : 'block') + '">' + offsetInputs + '</div>' +
       '<label class="f"><span>偏芯を測った高さ　GL+ (m)　※ GL以下なら負の値</span>' +
-        '<input id="e-h" type="number" inputmode="decimal" step="0.01" value="' + e.measH + '"></label>') +
-    (!isSetout && hasVideoEcc(m)
-      ? '<button class="btn" id="e-fromvideo" style="margin-bottom:10px">動画の計測値を使う（' + videoEccLabel(m) + '）</button>'
-      : '') +
+        '<input id="e-h" type="number" inputmode="decimal" step="0.01" value="' + v('measH') + '"></label>' +
+      (hasVideoEcc(m) ? '<button class="btn" id="e-fromvideo" style="margin-bottom:10px">動画の計測値を使う（' +
+        videoEccLabel(m) + '）</button>' : '')) +
     '<button class="btn" id="e-save">' + (isSetout ? '原点として記録' : '保存して判定') + '</button>' +
     '<div id="e-out" style="margin-top:14px"></div>';
 
   setTimeout(() => {
     const out = $('#e-out');
+    const sel = $('#e-mode');
+    if (sel) sel.addEventListener('change', () => {
+      $('#e-rods').style.display = sel.value === 'rods' ? 'block' : 'none';
+      $('#e-offs').style.display = sel.value === 'rods' ? 'none' : 'block';
+    });
 
     const render = () => {
       if (!m.ecc) {
-        out.innerHTML = '<div class="hint">' +
-          (isSetout ? '記録すると、最終計測でここからの移動量を偏芯として扱えます。'
-                    : '実測値を入力すると、設計杭頭レベルへ外挿して判定します。') + '</div>';
+        out.innerHTML = '<div class="hint">' + (isSetout
+          ? '記録すると、以後の計測はこの読みからの差で偏芯を出します。'
+          : '入力すると、設計杭頭レベルへ外挿して判定します。') + '</div>';
         return;
       }
       if (isSetout) {
-        const mag = Math.hypot(m.ecc.eA, m.ecc.eB);
         out.innerHTML = '<table class="kv"><tbody>' +
-          '<tr><td>' + ax[0] + '</td><td>' + fmt(m.ecc.eA, 0) + ' mm</td></tr>' +
-          '<tr><td>' + ax[1] + '</td><td>' + fmt(m.ecc.eB, 0) + ' mm</td></tr>' +
-          '<tr><td>合成</td><td>' + fmt(mag, 0) + ' mm</td></tr></tbody></table>' +
-          '<div class="hint" style="margin-top:10px">この値を原点として、最終計測の「移動量」に足して偏芯を求めます。</div>';
+          '<tr><td>' + esc(ax[0]) + '</td><td>' + fmt(m.ecc.r1, 0) + ' mm</td></tr>' +
+          '<tr><td>' + esc(ax[1]) + '</td><td>' + fmt(m.ecc.r2, 0) + ' mm</td></tr>' +
+          '</tbody></table><div class="hint" style="margin-top:10px">この読みを偏芯 0.0 の原点として記録しました。</div>';
         return;
       }
+      const off = eccOffsets(p.id, m);
+      if (!off) { out.innerHTML = '<div class="hint">杭芯セットの実測が未記録のため、実測値から偏芯を出せません。</div>'; return; }
       if (!tilt) { out.innerHTML = '<div class="hint">傾斜（2軸）が未計測のため外挿できません。</div>'; return; }
 
-      // 移動量で入力した場合は、杭芯セット時の残差を足して設計芯からの量にする
-      const base = (m.ecc.basis === 'move' && setoutEcc) ? setoutEcc : { eA: 0, eB: 0 };
-      const abs = { eA: m.ecc.eA + base.eA, eB: m.ecc.eB + base.eB };
       const dh = (m.ecc.measH || 0) + (p.headDepth || 0);
-      const h = extrapolate(abs, tilt, dh);
+      const h = extrapolate(off, tilt, dh);
+      h.mag = eccMag(h.hA, h.hB);
       const allow = eccAllow(p.dia);
       const ng = h.mag > allow;
       const col = ng ? 'var(--ng)' : (h.mag > allow * 0.7 ? 'var(--warn)' : 'var(--ok)');
+      const ortho = Math.abs(DB.settings.rodAngle - 90) > 0.01;
       out.innerHTML =
         '<div class="result-big"><div class="num" style="color:' + col + '">' + fmt(h.mag, 0) +
           '<span style="font-size:18px"> mm</span></div>' +
         '<div class="sub">設計杭頭レベルでの合成偏芯　（許容 ' + fmt(allow, 0) + 'mm）</div></div>' +
         '<table class="kv"><tbody>' +
-        (m.ecc.basis === 'move'
-          ? '<tr><td>杭芯セット時の残差</td><td>' +
-              (setoutEcc ? fmt(base.eA, 0) + ' / ' + fmt(base.eB, 0) + ' mm'
-                         : '<span class="badge b-warn">未記録（0として計算）</span>') + '</td></tr>' +
-            '<tr><td>そこからの移動量</td><td>' + fmt(m.ecc.eA, 0) + ' / ' + fmt(m.ecc.eB, 0) + ' mm</td></tr>'
+        (off.origin
+          ? '<tr><td>杭芯セット時の読み</td><td>' + fmt(off.origin.r1, 0) + ' / ' + fmt(off.origin.r2, 0) + ' mm</td></tr>' +
+            '<tr><td>今回の読み</td><td>' + fmt(m.ecc.r1, 0) + ' / ' + fmt(m.ecc.r2, 0) + ' mm</td></tr>'
           : '') +
-        '<tr><td>実測位置での合成偏芯</td><td>' + fmt(Math.hypot(abs.eA, abs.eB), 0) + ' mm</td></tr>' +
+        '<tr><td>ズレ量</td><td>' + fmt(off.eA, 0) + ' / ' + fmt(off.eB, 0) + ' mm</td></tr>' +
+        '<tr><td>実測位置での合成偏芯</td><td>' + fmt(eccMag(off.eA, off.eB), 0) + ' mm</td></tr>' +
         '<tr><td>外挿距離 Δh</td><td>' + fmt(dh, 2) + ' m</td></tr>' +
-        '<tr><td>傾斜による補正量</td><td>' + fmt(Math.hypot(tilt.tA, tilt.tB) * dh * 1000, 0) + ' mm</td></tr>' +
-        '<tr><td>杭頭 ' + ax[0] + '</td><td>' + fmt(h.hA, 0) + ' mm</td></tr>' +
-        '<tr><td>杭頭 ' + ax[1] + '</td><td>' + fmt(h.hB, 0) + ' mm</td></tr>' +
+        '<tr><td>傾斜による補正量</td><td>' + fmt(eccMag(tilt.tA * dh * 1000, tilt.tB * dh * 1000), 0) + ' mm</td></tr>' +
+        '<tr><td>杭頭 ' + esc(ax[0]) + '</td><td>' + fmt(h.hA, 0) + ' mm</td></tr>' +
+        '<tr><td>杭頭 ' + esc(ax[1]) + '</td><td>' + fmt(h.hB, 0) + ' mm</td></tr>' +
         '<tr><td>許容値 min(D/4, ' + DB.settings.eccMax + ')</td><td>' + fmt(allow, 0) + ' mm</td></tr>' +
         '<tr><td>判定</td><td><span class="badge ' + (ng ? 'b-ng' : 'b-ok') + '">' + (ng ? '要協議' : '合格') + '</span></td></tr>' +
         '</tbody></table>' +
-        '<div class="hint" style="margin-top:12px">※ 外挿は<b>杭が直線であること</b>を前提としています。地中での偏向（玉石・支持層の傾斜など）は地上からは判定できません。' +
+        '<div class="hint" style="margin-top:12px">' +
+        (ortho ? '※ 逃げ棒2本の成す角 ' + fmt(DB.settings.rodAngle, 0) + '° として合成しています。<br>' : '') +
+        '※ 外挿は<b>杭が直線であること</b>を前提としています。地中での偏向（玉石・支持層の傾斜など）は地上からは判定できません。' +
         (p.yat ? '<br>※ ヤットコ計測値は<b>ヤットコと杭が同軸</b>という前提で扱っています。' : '') + '</div>';
     };
 
     const fv = $('#e-fromvideo');
     if (fv) fv.addEventListener('click', () => {
+      if (sel) { sel.value = 'offset'; sel.dispatchEvent(new Event('change')); }
       if (m.A && m.A.eccMm !== undefined) $('#e-a').value = m.A.eccMm.toFixed(0);
       if (m.B && m.B.eccMm !== undefined) $('#e-b').value = m.B.eccMm.toFixed(0);
-      const bs = $('#e-basis'); if (bs) bs.value = 'move';
       toast('動画の計測値を入れました。計測高さは別途入力してください');
     });
 
     $('#e-save').addEventListener('click', () => {
-      const eA = parseFloat($('#e-a').value), eB = parseFloat($('#e-b').value);
-      if (!isFinite(eA) || !isFinite(eB)) { toast(ax[0] + '・' + ax[1] + 'の両方を入力してください'); return; }
-      if (isSetout) {
-        m.ecc = { eA, eB, measH: 0, basis: 'setout', at: Date.now() };
+      const md = isSetout ? 'rods' : sel.value;
+      const rec = { mode: md, at: Date.now() };
+      if (md === 'rods') {
+        const r1 = parseFloat($('#e-r1').value), r2 = parseFloat($('#e-r2').value);
+        if (!isFinite(r1) || !isFinite(r2)) { toast('逃げ棒2本の実測値を入れてください'); return; }
+        rec.r1 = r1; rec.r2 = r2;
       } else {
+        const eA = parseFloat($('#e-a').value), eB = parseFloat($('#e-b').value);
+        if (!isFinite(eA) || !isFinite(eB)) { toast('2方向のズレを入れてください'); return; }
+        rec.eA = eA; rec.eB = eB;
+      }
+      if (!isSetout) {
         const measH = parseFloat($('#e-h').value);
         if (!isFinite(measH)) { toast('計測した高さを入力してください'); return; }
-        m.ecc = { eA, eB, measH, basis: $('#e-basis').value, at: Date.now() };
-      }
+        rec.measH = measH;
+      } else rec.measH = 0;
+      m.ecc = rec;
       commitMeas(m); render(); toast('保存しました');
     });
     render();
@@ -2320,7 +2391,8 @@ function renderRecords() {
            '</td></tr>';
     });
     const so = s.byStep.setout && s.byStep.setout.meas.ecc;
-    if (so) h += '<tr><td>杭芯セット残差</td><td>' + fmt(Math.hypot(so.eA, so.eB), 0) + ' mm</td></tr>';
+    if (so && so.r1 !== undefined)
+      h += '<tr><td>杭芯セット時の読み</td><td>' + fmt(so.r1, 0) + ' / ' + fmt(so.r2, 0) + ' mm</td></tr>';
     if (s.joint) h += '<tr><td>継手 折れ角</td><td>1/' + fmt(s.joint.ratio, 0) + '（' + fmt(s.joint.deg, 3) + '°）</td></tr>';
     if (s.head) {
       const ng = s.head.mag > s.allow;
@@ -2349,7 +2421,7 @@ $('#r-csv').addEventListener('click', () => {
                 '偏芯_軸1_mm','偏芯_軸2_mm','偏芯計測高さm','外挿Δh_m',
                 '杭頭偏芯A_mm','杭頭偏芯B_mm','杭頭合成偏芯_mm','偏芯許容_mm','偏芯判定',
                 '継手折れ角_度','継手折れ角_1/n',
-                '杭芯セット残差_軸1_mm','杭芯セット残差_軸2_mm','偏芯の入力種別'];
+                '杭芯セット_読み1_mm','杭芯セット_読み2_mm','今回の読み1_mm','今回の読み2_mm','偏芯の入力種別'];
   const rows = [head];
   DB.piles.forEach(p => {
     const s = pileSummary(p.id);
@@ -2370,7 +2442,7 @@ $('#r-csv').addEventListener('click', () => {
       ];
       if (st.key === 'final' && m.ecc) {
         const dh = (m.ecc.measH || 0) + (p.headDepth || 0);
-        const a = s.absEcc || { eA: m.ecc.eA, eB: m.ecc.eB };
+        const a = s.absEcc || { eA: '', eB: '' };
         r.push(a.eA, a.eB, m.ecc.measH, dh.toFixed(2));
         if (s.head) r.push(s.head.hA.toFixed(0), s.head.hB.toFixed(0), s.head.mag.toFixed(0),
                            s.allow.toFixed(0), s.head.mag > s.allow ? '要協議' : '合格');
@@ -2378,9 +2450,10 @@ $('#r-csv').addEventListener('click', () => {
       } else r.push('', '', '', '', '', '', '', '', '');
       if (st.key === 'postweld' && s.joint) r.push(s.joint.deg.toFixed(4), s.joint.ratio.toFixed(0));
       else r.push('', '');
-      const so = s.byStep.setout && s.byStep.setout.meas.ecc;
-      r.push(so ? so.eA : '', so ? so.eB : '',
-             st.key === 'final' && m.ecc ? (m.ecc.basis === 'move' ? '杭芯セットからの移動量' : '絶対量') : '');
+      const soE = s.byStep.setout && s.byStep.setout.meas.ecc;
+      r.push(soE && soE.r1 !== undefined ? soE.r1 : '', soE && soE.r2 !== undefined ? soE.r2 : '',
+             m.ecc && m.ecc.r1 !== undefined ? m.ecc.r1 : '', m.ecc && m.ecc.r2 !== undefined ? m.ecc.r2 : '',
+             m.ecc ? (m.ecc.mode === 'rods' ? '逃げ棒からの実測' : 'ズレ量を直接入力') : '');
       rows.push(r);
     });
   });
@@ -2416,6 +2489,9 @@ $('#r-json').addEventListener('click', () => {
    設定
    ========================================================= */
 function renderSetup() {
+  $('#s-rod1').value = DB.settings.rod1;
+  $('#s-rod2').value = DB.settings.rod2;
+  $('#s-rodang').value = DB.settings.rodAngle;
   $('#s-tilt').value = DB.settings.tiltN;
   $('#s-ecc').value = DB.settings.eccMax;
   $('#s-pitch').value = DB.settings.pitchTol;
@@ -2427,6 +2503,13 @@ $('#s-save').addEventListener('click', () => {
   DB.settings.pitchTol= parseFloat($('#s-pitch').value) || 1.0;
   DB.settings.hfov    = parseFloat($('#s-hfov').value)  || 65;
   saveDB(); toast('設定を保存しました'); renderPiles();
+});
+$('#s-rodsave').addEventListener('click', () => {
+  DB.settings.rod1 = $('#s-rod1').value.trim() || '逃げ棒1';
+  DB.settings.rod2 = $('#s-rod2').value.trim() || '逃げ棒2';
+  const a = parseFloat($('#s-rodang').value);
+  DB.settings.rodAngle = (isFinite(a) && a > 20 && a < 160) ? a : 90;
+  saveDB(); renderMeasure(); toast('保存しました');
 });
 $('#s-perm').addEventListener('click', async () => { if (await Sensor.requestPermission()) toast('センサーを有効にしました'); });
 $('#s-clear').addEventListener('click', () => {

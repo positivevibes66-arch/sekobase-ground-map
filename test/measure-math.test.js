@@ -16,13 +16,13 @@ function loadMath() {
   const js = html.match(/<script>([\s\S]*?)<\/script>/g).pop().replace(/^<script>|<\/script>$/g, '');
   const cut = (from, to) => js.slice(js.indexOf(from), js.indexOf(to));
   const src =
-    'const DB={settings:{tiltN:100,eccMax:100,pitchTol:1,hfov:65}};\n' +
+    'const DB={settings:{tiltN:100,eccMax:100,pitchTol:1,hfov:65,rodAngle:90}};\n' +
     cut('const D2R', '/* ---------------- ステップ定義') +
     '\nconst Sensor={\n' + cut('  fromOrientation(beta, gamma) {', '  push(g) {') + '};\n' +
     cut('/* 画像内の線分', '/* =========================================================\n   データ操作');
   const ctx = { module: { exports: {} } };
   vm.createContext(ctx);
-  vm.runInContext(src + '\nmodule.exports={angleFromTrueVertical,buildView,composeTilt,jointAngle,extrapolate,eccAllow,Sensor};', ctx);
+  vm.runInContext(src + '\nmodule.exports={angleFromTrueVertical,buildView,composeTilt,jointAngle,extrapolate,eccAllow,vecMag,Sensor};', ctx);
   return ctx.module.exports;
 }
 const M = loadMath();
@@ -131,6 +131,19 @@ console.log('\n--- 6. 継手折れ角 ---');
 {
   const j=M.jointAngle({tA:0.005,tB:0.000},{tA:0.005,tB:0.010});
   ok('折れ角 1/n', j.ratio, 100, 0.5);
+}
+
+console.log('\n--- 6b. 逃げ棒が直交していない場合の合成 ---');
+{
+  // 既知のズレベクトル v を2方向へ射影し、そこから元の大きさが復元できるか
+  const v = [37, -24], want = Math.hypot(v[0], v[1]);
+  [90, 75, 105, 60].forEach(ang => {
+    const th = ang * D2R;
+    const d1 = v[0];                                   // u1 = (1,0)
+    const d2 = v[0] * Math.cos(th) + v[1] * Math.sin(th);  // u2 = (cosθ, sinθ)
+    ok('成す角 ' + ang + '° から復元', M.vecMag(d1, d2, ang), want, 1e-6);
+  });
+  ok('直交なら単純な二乗和', M.vecMag(30, 40, 90), 50, 1e-9);
 }
 
 console.log('\n--- 7. 偏芯許容値 ---');

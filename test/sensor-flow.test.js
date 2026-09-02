@@ -47,10 +47,11 @@ srv.listen(0, '127.0.0.1', async () => {
   await p.fill('#sn-x', '0.10'); await p.fill('#sn-y', '-0.05');
   await p.fill('#sn-name', 'WT901'); await p.click('#sn-save');
   await step(0);
-  await p.fill('#e-a', '0'); await p.fill('#e-b', '0'); await p.click('#e-save');
+  // 逃げ棒2本からの実測。設計距離は要らず、この読みが偏芯0.0の原点になる
+  await p.fill('#e-r1', '1500'); await p.fill('#e-r2', '1200'); await p.click('#e-save');
   await p.waitForTimeout(120);
   console.log('  傾斜:', (await p.textContent('#sn-out')).replace(/\s+/g, ' ').trim());
-  console.log('  残差:', (await p.textContent('#e-out')).replace(/\s+/g, ' ').trim().slice(0, 70));
+  console.log('  原点:', (await p.textContent('#e-out')).replace(/\s+/g, ' ').trim().slice(0, 80));
 
   // --- ② 最終: 傾斜をセンサーで、偏芯を「杭芯セットからの移動量」で ---
   await step(5);
@@ -58,8 +59,9 @@ srv.listen(0, '127.0.0.1', async () => {
   await p.fill('#sn-x', '0.45'); await p.fill('#sn-y', '0.30');
   await p.fill('#sn-name', 'WT901'); await p.click('#sn-save');
   await step(5);
-  await p.selectOption('#e-basis', 'move');
-  await p.fill('#e-a', '35'); await p.fill('#e-b', '-20'); await p.fill('#e-h', '0.5');
+  // 同じ測り方で再測。1535/1180 → 杭は X通りへ +35mm、Y通りへ -20mm 動いた
+  await p.selectOption('#e-mode', 'rods');
+  await p.fill('#e-r1', '1535'); await p.fill('#e-r2', '1180'); await p.fill('#e-h', '0.5');
   await p.click('#e-save'); await p.waitForTimeout(150);
   const out = (await p.textContent('#e-out')).replace(/\s+/g, ' ').trim();
   console.log('  ' + out.slice(0, 340));
@@ -81,7 +83,7 @@ srv.listen(0, '127.0.0.1', async () => {
   console.log('');
   ck('センサー入力が記録される', got.mode === 'sensor');
   ck('許容が min(D/4,100)=100mm', Math.abs(got.allow - 100) < 0.01);
-  ck('杭芯セット残差が原点として足される', Math.abs(got.absA - 35) < 0.01 && Math.abs(got.absB - (-20)) < 0.01);
+  ck('逃げ棒の読みの差が偏芯になる (+35 / -20)', Math.abs(got.absA - 35) < 0.01 && Math.abs(got.absB - (-20)) < 0.01);
   ck('外挿が手検算と一致 (<0.5mm)', Math.abs(got.mag - wantMag) < 0.5);
   ck('JSエラーなし', errs.length === 0);
   if (errs.length) console.log(errs.join('\n'));
