@@ -159,6 +159,83 @@ console.log('\n--- 6. コントラスト不足は「誤答」ではなく「棄�
   console.log('     コントラスト ' + contrast + '階調 → ' + verdict);
 });
 
+/* 実映像で追跡が全滅した条件の再現。
+   杭には製品表示の白文字が縁のすぐ内側にあり、円筒の陰影が輪郭と平行に
+   もう1本の線を作る。走査線ごとに独立して最も強い勾配を選ぶ方式では
+   これらを掴んで直線に乗らなかった。 */
+function makeConfusingPile({ slope, hw, textRows, shadeOffset }) {
+  const px = new Float32Array(W * H);
+  const ym = H / 2;
+  const S = t => 1 / (1 + Math.exp(-t / 0.9));
+  for (let y = 0; y < H; y++) {
+    const c = 720 + slope * (y - ym);
+    for (let x = 0; x < W; x++) {
+      const a = S(x - (c - hw)) * (1 - S(x - (c + hw)));
+      let v = 205 + (62 - 205) * a;
+      // 円筒の陰影: 右の縁より内側に、輪郭と平行な段差をもう1本作る
+      if (x > c + hw - shadeOffset && x < c + hw) v -= 45;
+      px[y * W + x] = v + (rnd() - 0.5) * 6;
+    }
+  }
+  // 製品表示の白文字（左の縁のすぐ内側に、飛び飛びの行で入る）
+  for (const ty of textRows) {
+    for (let y = ty; y < ty + 26; y++) {
+      if (y < 0 || y >= H) continue;
+      const c = 720 + slope * (y - ym);
+      for (let x = Math.round(c - hw + 8); x < Math.round(c - hw + 30); x++) px[y * W + x] = 245;
+    }
+  }
+  return px;
+}
+
+console.log('\n--- 7b. 縁のすぐ内側に白文字と陰影の線がある場合（実映像で全滅した条件）---');
+[0.35, -0.5].forEach(deg => {
+  const slope = -Math.tan(deg / R2D);
+  const px = makeConfusingPile({ slope, hw: 70, shadeOffset: 20,
+    textRows: [200, 340, 480, 620, 760, 900] });
+  const ctx = makeCtx(px);
+  T.Guides.L = 720 - 70; T.Guides.R = 720 + 70;
+  T.calibratePolarity(ctx);
+  const f = T.trackFrame(ctx, upright, null);
+  if (!f) { fails++; console.log('FAIL ' + deg + '° 追跡失敗'); return; }
+  ok(deg + '° を紛らわしい線に惑わされず復元', f.angle, expected(slope, upright), 0.03);
+});
+
+console.log('\n--- 7c. 走査範囲が指定した範囲に従うか（杭が画面の一部にしか無い場合）---');
+{
+  // 杭は上半分にしか無く、下半分は地面のテクスチャ
+  const slope = -Math.tan(0.4 / R2D), hw = 70, ym = H / 2;
+  const px = new Float32Array(W * H);
+  const S = t => 1 / (1 + Math.exp(-t / 0.9));
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    if (y < H * 0.55) {
+      const c = 720 + slope * (y - ym);
+      const a = S(x - (c - hw)) * (1 - S(x - (c + hw)));
+      px[y * W + x] = 205 + (62 - 205) * a + (rnd() - 0.5) * 6;
+    } else {
+      px[y * W + x] = 150 + 55 * Math.sin(x / 7) * Math.cos(y / 11) + (rnd() - 0.5) * 30;
+    }
+  }
+  const ctx = makeCtx(px);
+  T.Guides.L = 720 - hw; T.Guides.R = 720 + hw;
+  T.calibratePolarity(ctx);
+
+  T.Guides.yTop = 0.15; T.Guides.yBot = 0.85;      // 画面比で固定（従来）
+  const bad = T.trackFrame(ctx, upright, null);
+  console.log('     範囲を画面比で固定 (15〜85%) → ' + (bad ? '誤って採用: ' + bad.angle.toFixed(3) + '°' : '追跡失敗'));
+  if (bad && Math.abs(bad.angle - expected(slope, upright)) > 0.05) fails++;
+
+  T.Guides.yTop = 0.05; T.Guides.yBot = 0.50;      // 杭が写っている範囲だけ
+  const good = T.trackFrame(ctx, upright, null);
+  if (!good) { fails++; console.log('FAIL 指定範囲でも追跡失敗'); }
+  else {
+    const yA = H * 0.05, yB = H * 0.50;
+    const want = T.angleFromTrueVertical({ x: slope * (yA - ym), y: yA }, { x: slope * (yB - ym), y: yB }, upright);
+    ok('杭が写っている範囲 (5〜50%) を走査', good.angle, want, 0.02);
+  }
+  T.Guides.yTop = T.SCAN_TOP; T.Guides.yBot = T.SCAN_BOT;
+}
+
 console.log('\n--- 7. 連続フレームの平均で精度が上がるか（首振りのシミュレーション）---');
 {
   const trueDeg = 0.30, ampDeg = 0.25;      // 真の傾斜 0.30°、首振り振幅 ±0.25°

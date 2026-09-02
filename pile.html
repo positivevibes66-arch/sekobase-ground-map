@@ -584,6 +584,21 @@ function angleFromTrueVertical(p1, p2, grav) {
 }
 
 /* 4点（左エッジ2点 + 右エッジ2点）から1視点分の計測値を作る */
+/* 指定された4点の上下端から、追跡に使う縦方向の範囲を決める */
+function setGuidesFromPoints(pts, imgW, imgH) {
+  const ym = imgH / 2;
+  const at = (a, b) => a.x + (b.x - a.x) * ((ym - a.y) / ((b.y - a.y) || 1));
+  let L = at(pts[0], pts[1]), R = at(pts[2], pts[3]);
+  if (L > R) { const t = L; L = R; R = t; }
+  Guides.L = L; Guides.R = R;
+  const ys = pts.map(p => p.y);
+  const top = Math.min(...ys), bot = Math.max(...ys);
+  const inset = (bot - top) * 0.02;            // 端は指定がぶれやすいので少し内側から
+  Guides.yTop = clamp((top + inset) / imgH, 0.01, 0.9);
+  Guides.yBot = clamp((bot - inset) / imgH, Guides.yTop + 0.05, 0.99);
+  Guides.ready = true;
+}
+
 function buildView(pts, grav, imgW) {
   const aL = angleFromTrueVertical(pts[0], pts[1], grav);
   const aR = angleFromTrueVertical(pts[2], pts[3], grav);
@@ -973,7 +988,10 @@ async function startCapture(pile, step, view) {
   // 動画のサイズが決まってからガイド線を初期配置する
   const initGuides = () => {
     if (!v.videoWidth) { setTimeout(initGuides, 100); return; }
-    if (!Guides.ready) { Guides.L = v.videoWidth * 0.44; Guides.R = v.videoWidth * 0.56; }
+    if (!Guides.ready) {
+      Guides.L = v.videoWidth * 0.44; Guides.R = v.videoWidth * 0.56;
+      Guides.yTop = SCAN_TOP; Guides.yBot = SCAN_BOT;
+    }
   };
   initGuides();
   resetContUI();
@@ -1045,7 +1063,7 @@ function loopCam() {
     // 走査範囲（縦の有効区間）
     const fitv = videoFit();
     c.strokeStyle = 'rgba(255,255,255,.35)'; c.lineWidth = 1; c.setLineDash([4, 4]);
-    [SCAN_TOP, SCAN_BOT].forEach(f => {
+    [Guides.yTop, Guides.yBot].forEach(f => {
       const y = fitv.oy + fitv.h * f;
       c.beginPath(); c.moveTo(0, y); c.lineTo(w, y); c.stroke();
     });
@@ -1091,12 +1109,17 @@ $('#cam-shot').addEventListener('click', () => {
    その計測をどれだけ信用してよいかが数値で示せる。
    ========================================================= */
 
-const SCAN_TOP = 0.15, SCAN_BOT = 0.85;   // 走査する縦方向の範囲（画面比）
+const SCAN_TOP = 0.15, SCAN_BOT = 0.85;   // 走査範囲の初期値（画面高さに対する比）
 const SCAN_N = 11;                        // 走査線の本数
-const WIN_WIDE = 55, WIN_LOCK = 26;       // エッジ探索の窓幅[px]
+const WIN_WIDE = 55, WIN_LOCK = 26, WIN_MAX = 55;    // エッジ探索の窓幅[px]
+const FIT_RMS_MAX = 1.5;                  // 直線フィットの許容残差[px]
 
 let camMode = 'cont';
-const Guides = { L: 0, R: 0, ready: false };
+/* 杭の位置と、追跡に使う縦方向の範囲。
+   実映像では杭が画面の上半分にしか写っておらず、範囲を画面比で
+   固定していると下半分で地面を追いに行って全滅した。
+   利用者が指定したエッジの上下端から範囲を決める。 */
+const Guides = { L: 0, R: 0, yTop: SCAN_TOP, yBot: SCAN_BOT, ready: false };
 const Cont = {
   running: false, samples: [], rejected: 0, t0: 0, dur: 10000,
   model: null, sign: { L: -1, R: 1 }, lastFit: null, result: null, raf: 0,
@@ -1120,15 +1143,23 @@ function verticalSlope(g) {
   return ux / (-uy || -1e-9);
 }
 
-/* 走査線 y 上で、予測位置 xPred の周辺から輝度勾配のピークを
-   サブピクセルで求める。sign は杭が背景より暗いか明るいかで決まる。 */
-function findEdge(ctx, xPred, y, win, sign) {
+/* 走査線 y 上で、予測位置 xPred の周辺から杭のエッジをサブピクセルで求める。
+   sign は杭が背景より暗いか明るいかで決まる。
+
+   単純に「窓の中で最も強い勾配」を採ると、杭に書かれた製品表示の
+   白文字や背景の構造物のほうが強く、そちらを掴んで飛ぶ。
+   実映像ではこれで追跡が全滅した。
+   そこで局所最大をすべて候補として拾い、
+       強さ × 予測位置への近さ
+   で選ぶ。予測位置は利用者が指定したエッジ、または前フレームの
+   直線から来るので、真のエッジ以外は距離で負ける。 */
+function findEdgeCandidates(ctx, xPred, y, win, sign) {
   const W = ctx.canvas.width, H = ctx.canvas.height;
   const x0 = Math.max(0, Math.round(xPred - win));
   const x1 = Math.min(W, Math.round(xPred + win));
   const w = x1 - x0;
   const yy = Math.round(clamp(y, 1, H - 3));
-  if (w < 10) return null;
+  if (w < 10) return [];
 
   const d = ctx.getImageData(x0, yy - 1, w, 3).data;
   const g = new Float32Array(w);
@@ -1141,21 +1172,74 @@ function findEdge(ctx, xPred, y, win, sign) {
     g[i] = a / 3;
   }
   const grad = i => sign * (g[i + 1] - g[i - 1]);
-  let best = -Infinity, bi = -1, sum = 0, cnt = 0;
+  let sum = 0, cnt = 0;
+  for (let i = 2; i < w - 2; i++) { sum += Math.abs(grad(i)); cnt++; }
+  const mean = cnt ? sum / cnt : 0;
+
+  const sigma = Math.max(6, win / 3);
+  const out = [];
   for (let i = 2; i < w - 2; i++) {
     const v = grad(i);
-    sum += Math.abs(v); cnt++;
-    if (v > best) { best = v; bi = i; }
+    // 明確なエッジで、かつ局所最大であること（平坦面やノイズを除く）
+    if (v < 4 || v < mean * 2.5) continue;
+    if (v < grad(i - 1) || v < grad(i + 1)) continue;
+    const a = grad(i - 1), b = v, c = grad(i + 1);
+    const den = a - 2 * b + c;
+    const sub = den !== 0 ? clamp(0.5 * (a - c) / den, -1, 1) : 0;
+    const x = x0 + i + sub;
+    const dist = (x - xPred) / sigma;
+    out.push({ x, v, score: v * Math.exp(-0.5 * dist * dist) });
   }
-  if (bi < 0) return null;
-  const mean = cnt ? sum / cnt : 0;
-  // 明確なエッジでなければ捨てる（平坦な面やノイズへの誤検出を防ぐ）
-  if (best < 4 || best < mean * 2.5) return null;
+  out.sort((p, q) => q.score - p.score);
+  return out.slice(0, 6);
+}
 
-  const a = grad(bi - 1), b = grad(bi), c = grad(bi + 1);
-  const den = a - 2 * b + c;
-  const sub = den !== 0 ? clamp(0.5 * (a - c) / den, -1, 1) : 0;
-  return x0 + bi + sub;
+/* 候補のうち最良の1点だけを返す（単独のエッジを見たいとき用） */
+function findEdge(ctx, xPred, y, win, sign) {
+  const c = findEdgeCandidates(ctx, xPred, y, win, sign);
+  return c.length ? c[0].x : null;
+}
+
+/* 走査線ごとの候補から、最も多くの走査線が乗る1本の直線を選ぶ（RANSAC）。
+
+   走査線ごとに独立して「一番良さそうな1点」を選ぶと、杭の製品表示の
+   文字や円筒の陰影の境目が混ざり、点が直線に乗らない。
+   実映像では検出自体は毎フレーム11/11成功しているのに、
+   残差が中央値2.8〜7.1pxになって全部弾かれていた。
+
+   真のエッジは「すべての走査線で1本の直線に乗る」唯一の集合なので、
+   候補を残したまま、離れた2本の走査線から直線を仮定して
+   何本が乗るかを数え、最良の仮定を採る。
+   杭はほぼ鉛直なので、傾きが鉛直から大きく外れる仮定は初めから捨てる。 */
+function fitEdgeRansac(lines, slopePrior) {
+  const use = lines.filter(l => l.list.length);
+  if (use.length < 6) return null;
+  const TOL = 1.5, SLOPE_TOL = 0.25, GAP = 4;
+  let best = null;
+  for (let i = 0; i < use.length; i++) {
+    for (let j = i + GAP; j < use.length; j++) {
+      const A = use[i], B = use[j], dy = B.y - A.y;
+      if (Math.abs(dy) < 1) continue;
+      for (const a of A.list) for (const b of B.list) {
+        const slope = (b.x - a.x) / dy;
+        if (Math.abs(slope - slopePrior) > SLOPE_TOL) continue;
+        let n = 0, sc = 0;
+        const pts = [];
+        for (const L of use) {
+          const xp = a.x + slope * (L.y - A.y);
+          let pick = null, bd = TOL;
+          for (const cnd of L.list) {
+            const d = Math.abs(cnd.x - xp);
+            if (d < bd) { bd = d; pick = cnd; }
+          }
+          if (pick) { n++; sc += pick.score; pts.push({ x: pick.x, y: L.y }); }
+        }
+        if (!best || n > best.n || (n === best.n && sc > best.sc)) best = { n, sc, pts };
+      }
+    }
+  }
+  if (!best || best.n < 6) return null;
+  return fitLineX(best.pts);
 }
 
 /* x = a + b*(y - ym) の最小二乗フィット（外れ値を1回除去） */
@@ -1171,49 +1255,96 @@ function fitLineX(pts) {
     const rms = Math.sqrt(ps.reduce((s, p) => s + Math.pow(p.x - (xm + b * (p.y - ym)), 2), 0) / n);
     return { a: xm, b, ym, rms, n };
   };
-  let f = fit(pts);
-  const keep = pts.filter(p => Math.abs(p.x - (f.a + f.b * (p.y - f.ym))) <= Math.max(1.2, f.rms * 2.5));
-  if (keep.length >= 4 && keep.length < pts.length) f = fit(keep);
+  let cur = pts, f = fit(cur);
+  for (let pass = 0; pass < 2; pass++) {
+    const tol = Math.max(1.2, f.rms * 2.0);
+    const keep = cur.filter(p => Math.abs(p.x - (f.a + f.b * (p.y - f.ym))) <= tol);
+    if (keep.length < 5 || keep.length === cur.length) break;
+    cur = keep; f = fit(cur);
+  }
   return f;
 }
 
-/* 1フレームぶんの追跡。成功すれば左右エッジの直線と傾斜角を返す */
+/* 1フレームぶんの追跡。
+
+   実映像で分かったこと:
+   杭の片側が重機や日陰に重なると、その側の輪郭は候補にすら挙がらない
+   （勾配がノイズに埋もれる）。左右の両方が揃うことを条件にすると、
+   良く写っている側まで巻き添えで捨ててしまい、1フレームも通らなかった。
+
+   角度を測るのに必要なのは「杭軸に平行な直線」が1本あることだけで、
+   両側は要らない。円筒の陰影の境目も軸に平行なので角度としては等価。
+   そこで左右を独立に当て、通ったほうを使う。両方通ったときは平均し、
+   食い違いが大きければ何かを掴み違えているとみて棄却する。          */
 function trackFrame(ctx, grav, prev) {
   const vh = ctx.canvas.height;
-  const yTop = vh * SCAN_TOP, yBot = vh * SCAN_BOT;
+  const yTop = vh * Guides.yTop, yBot = vh * Guides.yBot;
   const slope = verticalSlope(grav);
-  const out = {};
+  const ym = (yTop + yBot) / 2;
+
+  /* 予測位置の決め方。手持ち撮影ではカメラが動くので、見失ったときに
+     最初のガイド位置へ戻ると杭がもうそこに無く、復帰できない。
+     直前の当たりを起点に、見失った長さだけ窓を広げて探す。
+     片側しか取れていないときは、指定された幅だけずらして反対側を予測する。 */
+  const lost = (prev && prev.lost) || 0;
+  const w0 = Math.abs(Guides.R - Guides.L);
+  const shift = (f, d) => ({ a: f.a + d, b: f.b, ym: f.ym });
+  let bL = prev && prev.L, bR = prev && prev.R;
+  if (!bL && bR) bL = shift(bR, -w0);
+  if (!bR && bL) bR = shift(bL, w0);
+  const base0 = { L: bL, R: bR };
+
+  const fits = {};
   for (const k of ['L', 'R']) {
-    const base = prev && prev[k] ? prev[k] : { a: Guides[k], b: slope, ym: (yTop + yBot) / 2 };
-    const win = prev ? WIN_LOCK : WIN_WIDE;
-    const pts = [];
+    const locked = base0[k];
+    const base = locked || { a: Guides[k], b: slope, ym };
+    const win = locked ? Math.min(WIN_LOCK * (1 + lost), WIN_MAX) : WIN_WIDE;
+    const lines = [];
     for (let i = 0; i < SCAN_N; i++) {
       const y = yTop + (yBot - yTop) * (i / (SCAN_N - 1));
-      const x = findEdge(ctx, base.a + base.b * (y - base.ym), y, win, Cont.sign[k]);
-      if (x !== null) pts.push({ x, y });
+      lines.push({ y, list: findEdgeCandidates(ctx, base.a + base.b * (y - base.ym), y, win, Cont.sign[k]) });
     }
-    const f = fitLineX(pts);
-    if (!f || f.n < 6 || f.rms > 1.5) return null;
-    out[k] = f;
+    const f = fitEdgeRansac(lines, slope);
+    if (f && f.n >= 6 && f.rms <= FIT_RMS_MAX) fits[k] = f;
   }
-  const ang = k => {
-    const f = out[k], yA = vh * SCAN_TOP, yB = vh * SCAN_BOT;
-    return angleFromTrueVertical(
-      { x: f.a + f.b * (yA - f.ym), y: yA },
-      { x: f.a + f.b * (yB - f.ym), y: yB }, grav);
-  };
-  const aL = ang('L'), aR = ang('R');
-  if (Math.abs(aL - aR) > 0.5) return null;      // 左右のエッジが平行でない = 追跡失敗
-  out.angleL = aL; out.angleR = aR; out.angle = (aL + aR) / 2;
-  out.midX = (out.L.a + out.R.a) / 2;
+  if (!fits.L && !fits.R) return null;
+
+  const ang = f => angleFromTrueVertical(
+    { x: f.a + f.b * (yTop - f.ym), y: yTop },
+    { x: f.a + f.b * (yBot - f.ym), y: yBot }, grav);
+
+  const out = { L: fits.L || null, R: fits.R || null };
+  if (fits.L && fits.R) {
+    const aL = ang(fits.L), aR = ang(fits.R);
+    if (Math.abs(aL - aR) > 0.5) return null;   // 片方が別の線を掴んでいる
+    out.angleL = aL; out.angleR = aR; out.angle = (aL + aR) / 2;
+    out.midX = (fits.L.a + fits.R.a) / 2;
+    out.edges = 2;
+  } else {
+    const k = fits.L ? 'L' : 'R', f = fits[k];
+    const a = ang(f);
+    out.angleL = a; out.angleR = a; out.angle = a;
+    // 片側しか無いときは、指定された幅の半分だけ内側を中心とみなす
+    const half = Math.abs(Guides.R - Guides.L) / 2;
+    out.midX = f.a + (k === 'L' ? half : -half);
+    out.edges = 1;
+  }
   return out;
 }
 
+/* 見失いを数える。長く外れ続けたら諦めて、指定されたガイドから捕り直す */
+function nextLost(model) {
+  if (!model) return null;
+  const lost = (model.lost || 0) + 1;
+  return lost > 15 ? null : Object.assign({}, model, { lost });
+}
+
 function drawTracked(c, f, fit) {
-  const yA = fit.vh * SCAN_TOP, yB = fit.vh * SCAN_BOT;
+  const yA = fit.vh * Guides.yTop, yB = fit.vh * Guides.yBot;
   c.lineWidth = 2; c.strokeStyle = 'rgba(88,166,255,.95)';
   ['L', 'R'].forEach(k => {
     const m = f[k];
+    if (!m) return;                       // 片側しか取れていないフレーム
     const x1 = (m.a + m.b * (yA - m.ym)) * fit.scale + fit.ox;
     const x2 = (m.a + m.b * (yB - m.ym)) * fit.scale + fit.ox;
     c.beginPath();
@@ -1226,7 +1357,7 @@ function drawTracked(c, f, fit) {
 /* 杭が背景より暗いか明るいかを判定してエッジの極性を決める */
 function calibratePolarity(ctx) {
   const vh = ctx.canvas.height;
-  const y = Math.round(vh / 2);
+  const y = Math.round(vh * (Guides.yTop + Guides.yBot) / 2);
   const x0 = Math.max(0, Math.round(Guides.L - 50));
   const x1 = Math.min(ctx.canvas.width, Math.round(Guides.R + 50));
   if (x1 - x0 < 20) return;
@@ -1281,12 +1412,12 @@ function pump() {
     if (Math.abs(grav.pitch) <= DB.settings.pitchTol) {
       const f = trackFrame(workCtx, grav, Cont.model);
       if (f) {
-        Cont.model = { L: f.L, R: f.R };
+        Cont.model = { L: f.L, R: f.R, lost: 0 };
         Cont.lastFit = f;
         Cont.samples.push({ t: el, angle: f.angle,
                             edgeDiff: Math.abs(f.angleL - f.angleR),
-                            midX: f.midX, pitch: grav.pitch });
-      } else { Cont.rejected++; Cont.model = null; }   // 見失ったら次フレームで再捕捉
+                            midX: f.midX, pitch: grav.pitch, edges: f.edges });
+      } else { Cont.rejected++; Cont.model = nextLost(Cont.model); }
     } else Cont.rejected++;
 
     $('#cont-prog').style.width = clamp(el / Cont.dur * 100, 0, 100) + '%';
@@ -1716,7 +1847,9 @@ function vfMsg() {
   const parts = [];
   parts.push(VF.vertSet ? '① 鉛直基準 ✓（' + fmt(vertRefDeg(), 2) + '°）'
                         : '① 鉛直基準 — 未設定（画像の鉛直を使用中）');
-  parts.push(VF.edgesSet ? '② エッジ ✓' : '② エッジ — 未設定');
+  parts.push(VF.edgesSet
+    ? '② エッジ ✓（縦 ' + Math.round(Guides.yTop * 100) + '〜' + Math.round(Guides.yBot * 100) + '%）'
+    : '② エッジ — 未設定');
   $('#vf-msg').innerHTML = parts.join('　/　');
   $('#vf-run').disabled = !VF.edgesSet || VF.running;
 }
@@ -1754,11 +1887,8 @@ $('#vf-edges').addEventListener('click', () => {
     sub: '追跡の初期位置になります',
     preview: pts => livePreview(pts),
     onDone: pts => {
-      const ym = VF.seed.height / 2;
-      const at = (a, b) => a.x + (b.x - a.x) * ((ym - a.y) / ((b.y - a.y) || 1));
-      Guides.L = at(pts[0], pts[1]); Guides.R = at(pts[2], pts[3]);
-      if (Guides.L > Guides.R) { const t = Guides.L; Guides.L = Guides.R; Guides.R = t; }
-      Guides.ready = true; VF.edgesSet = true;
+      setGuidesFromPoints(pts, VF.seed.width, VF.seed.height);
+      VF.edgesSet = true;
       closeMark(); vfMsg();
     },
   });
@@ -1826,10 +1956,10 @@ async function runVideo() {
     workCtx.drawImage(v, 0, 0);
     const f = trackFrame(workCtx, VF.grav, VF.model);
     if (f) {
-      VF.model = { L: f.L, R: f.R };
+      VF.model = { L: f.L, R: f.R, lost: 0 };
       VF.samples.push({ t: v.currentTime * 1000, angle: f.angle,
-                        edgeDiff: Math.abs(f.angleL - f.angleR), midX: f.midX, pitch: 0 });
-    } else { VF.rejected++; VF.model = null; }
+                        edgeDiff: Math.abs(f.angleL - f.angleR), midX: f.midX, pitch: 0, edges: f.edges });
+    } else { VF.rejected++; VF.model = nextLost(VF.model); }
 
     if (isFinite(v.duration) && v.duration > 0)
       $('#vf-prog').style.width = clamp(v.currentTime / v.duration * 100, 0, 100) + '%';

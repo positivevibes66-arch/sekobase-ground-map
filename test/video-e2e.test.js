@@ -144,7 +144,7 @@ const WOBBLE   = 0.30;   // 首振り振幅
       n: VF.result.n, rej: VF.result.rejected, edgeDiff: VF.result.edgeDiff,
     }));
     console.log('\n' + rate + '倍速で解析:');
-    console.log('  採用 ' + out.n + ' フレーム（全90） / 追跡失敗 ' + out.rej);
+    console.log('  採用 ' + out.n + ' フレーム / 追跡失敗 ' + out.rej);
     console.log('  平均 ' + out.angle.toFixed(4) + '°  (真値 ' + TRUE_DEG + '°、誤差 ' + (out.angle - TRUE_DEG).toFixed(4) + '°)');
     console.log('  1σ ' + out.sd.toFixed(3) + '°（首振り振幅 ±' + WOBBLE + '° を反映）');
     console.log('  平均の標準誤差 ±' + out.sem.toFixed(4) + '°');
@@ -166,7 +166,7 @@ const WOBBLE   = 0.30;   // 首振り振幅
   const check = (name, cond) => { console.log((cond ? 'ok   ' : 'FAIL ') + name); if (!cond) fail++; };
   console.log('');
   check('真値との誤差 < 0.05°', Math.abs(r.angle - TRUE_DEG) < 0.05);
-  check('等速なら大半のフレームを拾う (>70/90)', r.n > 70);
+  check('等速なら十分なフレーム数を拾う (>70)', r.n > 70);
   check('早送りでもフレーム落ちが結果を歪めない (<0.05°)', Math.abs(r4.angle - r.angle) < 0.05);
   // 統計的に整合しているか（平均が真値から標準誤差の3倍以内 = 系統的な偏りが無い）
   check('平均が真値と統計的に整合 (|誤差| < 3×標準誤差)', Math.abs(r.angle - TRUE_DEG) < 3 * r.sem);
