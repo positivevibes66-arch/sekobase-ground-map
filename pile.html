@@ -231,6 +231,18 @@
   </div>
 
   <div class="card">
+    <h2 style="margin-top:0">IFCから取り込む</h2>
+    <div class="hint" style="margin-bottom:10px">既に杭のIFCがあるとき。<b>GUIDを引き継ぐ</b>ので、
+      計測後に元のファイルへ書き戻せます。</div>
+    <button class="btn" id="ifc-pick">IFCファイルを選ぶ</button>
+    <input type="file" id="ifc-input" accept=".ifc,text/plain" style="display:none">
+    <div id="ifc-body" style="display:none;margin-top:12px">
+      <div id="ifc-info" class="hint" style="margin-bottom:10px"></div>
+      <button class="btn primary" id="ifc-go">杭リストに取り込む</button>
+    </div>
+  </div>
+
+  <div class="card">
     <h2 style="margin-top:0">CAD図面（DXF）から取り込む</h2>
     <div class="hint" style="margin-bottom:10px">杭伏図の円（杭）と文字（杭番号）を拾って杭リストを作ります。
       円の中心が設計座標、円の直径が杭径になります。</div>
@@ -281,7 +293,9 @@
     <div style="height:8px"></div>
     <button class="btn" id="r-json">JSONを書き出す（地盤MAP取り込み用）</button>
     <div style="height:8px"></div>
-    <button class="btn" id="r-ifc">IFCを書き出す（BIMモデル連携）</button>
+    <button class="btn" id="r-ifc">IFCを書き出す（新規ファイル）</button>
+    <div style="height:8px"></div>
+    <button class="btn primary" id="r-ifc-merge">元のIFCに書き戻す（GUIDを保つ）</button>
   </div>
 </section>
 
@@ -2530,6 +2544,238 @@ function renderRecords() {
 }
 
 /* =========================================================
+   IFC の読み込みと書き戻し
+
+   すでに杭の IFC がある場合は、そこから杭リスト（GUID つき）を取り込み、
+   計測が終わったら「元のファイルに追記」で書き戻す。
+   新しいファイルを作り直すと GUID が変わって上流と結び直せなくなるため、
+   元のテキストをそのまま保ち、プロパティセットだけを足す方式にする。
+
+   ISO-10303-21 の実体は「#番号=型(引数,...);」の繰り返しなので、
+   文字列の中の括弧やカンマを取り違えないように読み進める。
+   ========================================================= */
+
+function spfSplit(s) {                     // 引数を最上位のカンマで分ける
+  const out = []; let cur = '', depth = 0, str = false;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (str) { if (c === "'") { if (s[i + 1] === "'") { cur += "''"; i++; continue; } str = false; } cur += c; continue; }
+    if (c === "'") { str = true; cur += c; continue; }
+    if (c === '(') depth++;
+    else if (c === ')') depth--;
+    else if (c === ',' && depth === 0) { out.push(cur.trim()); cur = ''; continue; }
+    cur += c;
+  }
+  out.push(cur.trim());
+  return out;
+}
+
+function spfEntities(text) {
+  const d = text.indexOf('DATA;');
+  const body = d < 0 ? text : text.slice(d + 5);
+  const map = new Map();
+  let i = 0;
+  while (i < body.length) {
+    const h = body.indexOf('#', i);
+    if (h < 0) break;
+    let j = h + 1, id = '';
+    while (j < body.length && body[j] >= '0' && body[j] <= '9') id += body[j++];
+    if (!id || body[j] !== '=') { i = h + 1; continue; }
+    j++;
+    let k = j, depth = 0, str = false;
+    while (k < body.length) {
+      const c = body[k];
+      if (str) { if (c === "'") { if (body[k + 1] === "'") { k += 2; continue; } str = false; } k++; continue; }
+      if (c === "'") { str = true; k++; continue; }
+      if (c === '(') depth++;
+      else if (c === ')') depth--;
+      else if (c === ';' && depth === 0) break;
+      k++;
+    }
+    const rec = body.slice(j, k).trim();
+    const pp = rec.indexOf('(');
+    if (pp > 0) map.set('#' + id, { type: rec.slice(0, pp).trim().toUpperCase(),
+                                    args: spfSplit(rec.slice(pp + 1, rec.lastIndexOf(')'))) });
+    i = k + 1;
+  }
+  return map;
+}
+
+/* IFCの文字列を素の文字に戻す（\X2\…\X0\ は UTF-16） */
+function spfStr(v) {
+  if (!v || v[0] !== "'") return null;
+  return v.slice(1, -1).replace(/''/g, "'")
+    .replace(/\\X2\\([0-9A-Fa-f]+)\\X0\\/g, (m, hex) => {
+      let o = '';
+      for (let i = 0; i + 3 < hex.length; i += 4) o += String.fromCharCode(parseInt(hex.substr(i, 4), 16));
+      return o;
+    })
+    .replace(/\\X\\([0-9A-Fa-f]{2})/g, (m, h) => String.fromCharCode(parseInt(h, 16)))
+    .replace(/\\\\/g, '\\');
+}
+const spfNum = v => { const n = parseFloat(v); return isFinite(n) ? n : null; };
+/* IFCLABEL('...') や IFCLENGTHMEASURE(406.4) の中身を取り出す */
+function spfVal(v) {
+  if (!v || v === '$') return null;
+  const m = v.match(/^[A-Za-z]+\((.*)\)$/s);
+  const inner = m ? m[1] : v;
+  if (inner[0] === "'") return spfStr(inner);
+  if (inner === '.T.') return true;
+  if (inner === '.F.') return false;
+  const n = parseFloat(inner);
+  return isFinite(n) ? n : inner;
+}
+
+const IFCSRC = { text: null, name: '', piles: [] };
+
+function importIFC(text) {
+  const E = spfEntities(text);
+  const refs = s => (s.match(/#\d+/g) || []);
+
+  // 杭ごとのプロパティセットを集める
+  const byPile = new Map();
+  E.forEach(e => {
+    if (e.type !== 'IFCRELDEFINESBYPROPERTIES') return;
+    const ps = E.get((e.args[5] || '').trim());
+    if (!ps || ps.type !== 'IFCPROPERTYSET') return;
+    const pname = spfStr(ps.args[2]) || '';
+    const props = {};
+    refs(ps.args[4]).forEach(r => {
+      const q = E.get(r);
+      if (q && q.type === 'IFCPROPERTYSINGLEVALUE') props[spfStr(q.args[0])] = spfVal(q.args[2]);
+    });
+    refs(e.args[4]).forEach(t => {
+      if (!byPile.has(t)) byPile.set(t, {});
+      byPile.get(t)[pname] = props;
+    });
+  });
+
+  const out = [];
+  E.forEach((e, id) => {
+    if (e.type !== 'IFCPILE') return;
+    const ps = byPile.get(id) || {};
+    const design = ps['Pset_杭設計値'] || {};
+    const coord = ps['Pset_杭伏図座標'] || {};
+    // 配置から座標を取る（座標のプロパティが無い場合の保険）
+    let x = coord['X_mm'], y = coord['Y_mm'], z = null;
+    const lp = E.get((e.args[5] || '').trim());
+    if (lp && lp.type === 'IFCLOCALPLACEMENT') {
+      const ax = E.get((lp.args[1] || '').trim());
+      const pt = ax && E.get((ax.args[0] || '').trim());
+      if (pt && pt.type === 'IFCCARTESIANPOINT') {
+        const c = spfSplit(pt.args[0].replace(/^\(|\)$/g, '')).map(spfNum);
+        if (x === undefined || x === null) x = c[0];
+        if (y === undefined || y === null) y = c[1];
+        z = c[2];
+      }
+    }
+    const top = design['杭天端'];
+    let head = null;
+    if (z !== null && z < 0) head = -z / 1000;
+    else if (typeof top === 'string') {
+      const m = top.match(/-\s*([\d.]+)/);
+      if (m) { const v = parseFloat(m[1]); head = v > 100 ? v / 1000 : v; }
+    }
+    out.push({
+      ifcId: id, ifcGuid: spfStr(e.args[0]),
+      no: design['杭番号'] || spfStr(e.args[2]) || '',
+      dia: design['杭径_mm'] || null, thick: design['板厚_mm'] || null,
+      len: design['杭長_m'] || null, steel: design['材質'] || '',
+      method: design['工法'] || spfStr(e.args[4]) || '',
+      x: x === undefined ? null : x, y: y === undefined ? null : y,
+      headDepth: head, design, coord, psets: ps,
+    });
+  });
+  out.sort((a, b) => a.no.localeCompare(b.no, 'ja', { numeric: true }));
+  return out;
+}
+
+function ifcLoad(text, fname) {
+  const piles = importIFC(text);
+  if (!piles.length) { toast('IfcPile が見つかりませんでした'); return; }
+  IFCSRC.text = text; IFCSRC.name = fname; IFCSRC.piles = piles;
+  ImgStore.put('ifc_source', text);
+  const d = piles[0];
+  const psetNames = Object.keys(d.psets);
+  $('#ifc-info').innerHTML =
+    '<b>' + piles.length + ' 本</b>　' + esc(piles[0].no) + ' 〜 ' + esc(piles[piles.length - 1].no) + '<br>' +
+    'φ' + (d.dia || '?') + ' / 板厚' + (d.thick || '?') + ' / L' + (d.len || '?') + 'm / ' +
+    esc(d.steel || '?') + ' / 杭天端 GL-' + fmt(d.headDepth, 2) + 'm<br>' +
+    '<span style="color:var(--dim)">プロパティセット: ' + psetNames.map(esc).join(', ') + '</span>';
+  $('#ifc-body').style.display = 'block';
+}
+
+$('#ifc-pick').addEventListener('click', () => $('#ifc-input').click());
+$('#ifc-input').addEventListener('change', e => {
+  const f = e.target.files && e.target.files[0];
+  if (!f) return;
+  const r = new FileReader();
+  r.onload = ev => { try { ifcLoad(ev.target.result, f.name); } catch (err) { toast('IFCを読めませんでした'); } };
+  r.readAsText(f);
+});
+
+$('#ifc-go').addEventListener('click', () => {
+  let n = 0, skip = 0;
+  IFCSRC.piles.forEach(q => {
+    const ex = DB.piles.find(p => p.no === q.no);
+    if (ex) {                                  // 既にある杭は GUID と設計値だけ更新する
+      Object.assign(ex, { ifcGuid: q.ifcGuid, x: q.x, y: q.y,
+        dia: q.dia || ex.dia, thick: q.thick || ex.thick, len: q.len || ex.len,
+        steel: q.steel || ex.steel, method: q.method || ex.method,
+        headDepth: q.headDepth !== null ? q.headDepth : ex.headDepth });
+      skip++; return;
+    }
+    if (addPile(q.no, q.dia || 0, q.headDepth || 0, false, {
+      x: q.x, y: q.y, len: q.len, thick: q.thick, steel: q.steel,
+      method: q.method, ifcGuid: q.ifcGuid,
+    })) n++;
+  });
+  saveDB(); renderPiles();
+  toast(n + '本を追加、' + skip + '本を更新しました');
+});
+
+/* 元の IFC にプロパティセットを追記して書き戻す。
+   既存の実体には一切触れないので GUID も形状もそのまま残る。 */
+function mergeIFC() {
+  let text = IFCSRC.text;
+  if (!text) { toast('元のIFCが読み込まれていません'); return null; }
+  // 前回追記した分があれば取り除く（何度でもやり直せるように）
+  text = text.replace(/\/\* SEKOBASE-BEGIN \*\/[\s\S]*?\/\* SEKOBASE-END \*\//g, '');
+
+  let maxId = 0;
+  (text.match(/#(\d+)\s*=/g) || []).forEach(m => {
+    const n = parseInt(m.slice(1), 10); if (n > maxId) maxId = n;
+  });
+  const guidToId = new Map();
+  spfEntities(text).forEach((e, id) => {
+    if (e.type === 'IFCPILE') guidToId.set(spfStr(e.args[0]), id);
+  });
+
+  const L = [];
+  let id = maxId;
+  const put = t => { L.push('#' + (++id) + '=' + t + ';'); return '#' + id; };
+  let added = 0;
+
+  DB.piles.forEach(p => {
+    const target = p.ifcGuid && guidToId.get(p.ifcGuid);
+    if (!target) return;
+    const rows = asBuiltRows(p);
+    if (rows.length <= 1) return;          // 基準軸だけ＝未計測なので付けない
+    const refs = rows.map(([n, ty, v]) =>
+      put('IFCPROPERTYSINGLEVALUE(' + ifcStr(n) + ',$,' + ty + '(' + v + '),$)'));
+    const ps = put('IFCPROPERTYSET(' + ifcStr(ifcGuid()) + ',$,' + ifcStr('Pset_杭出来形') +
+                   ',$,(' + refs.join(',') + '))');
+    put('IFCRELDEFINESBYPROPERTIES(' + ifcStr(ifcGuid()) + ',$,$,$,(' + target + '),' + ps + ')');
+    added++;
+  });
+  if (!added) { toast('書き戻せる計測結果がありません'); return null; }
+
+  const block = '/* SEKOBASE-BEGIN */\n' + L.join('\n') + '\n/* SEKOBASE-END */\n';
+  const at = text.lastIndexOf('ENDSEC;');
+  return { text: text.slice(0, at) + block + text.slice(at), count: added };
+}
+
+/* =========================================================
    DXF（杭伏図）から杭リストを起こす
 
    設計モデルの IFC が無く CAD 図面しか無い現場が多いので、
@@ -2735,6 +2981,48 @@ const ifcR = v => {                       // IFCのREALは必ず小数点を含�
   return s.includes('.') || s.includes('E') ? s : s + '.';
 };
 
+/* 出来形（偏芯・傾斜）のプロパティ。新規書き出しと書き戻しで共用する */
+function asBuiltRows(p) {
+  const sum = pileSummary(p.id);
+  if (!sum) return [];
+  const fin = sum.byStep.final, so = sum.byStep.setout;
+  const t = fin && fin.tilt;
+  const lim = 1 / DB.settings.tiltN;
+  const ax = axisNames();
+  const rows = [
+    ['基準軸', 'IFCLABEL', ifcStr(ax[0] + ' / ' + ax[1] +
+      (Math.abs(DB.settings.rodAngle - 90) > 0.01 ? '（成す角 ' + DB.settings.rodAngle + '°）' : ''))],
+  ];
+  if (so && so.meas.ecc && so.meas.ecc.r1 !== undefined) {
+    rows.push(['杭芯セット_読み1_mm', 'IFCLENGTHMEASURE', ifcR(so.meas.ecc.r1)]);
+    rows.push(['杭芯セット_読み2_mm', 'IFCLENGTHMEASURE', ifcR(so.meas.ecc.r2)]);
+  }
+  if (sum.absEcc) {
+    rows.push(['偏芯_' + ax[0] + '_mm', 'IFCLENGTHMEASURE', ifcR(sum.absEcc.eA)]);
+    rows.push(['偏芯_' + ax[1] + '_mm', 'IFCLENGTHMEASURE', ifcR(sum.absEcc.eB)]);
+  }
+  if (sum.head) {
+    rows.push(['杭頭偏芯_' + ax[0] + '_mm', 'IFCLENGTHMEASURE', ifcR(sum.head.hA)]);
+    rows.push(['杭頭偏芯_' + ax[1] + '_mm', 'IFCLENGTHMEASURE', ifcR(sum.head.hB)]);
+    rows.push(['杭頭偏芯_合成_mm', 'IFCLENGTHMEASURE', ifcR(sum.head.mag)]);
+    rows.push(['偏芯_許容_mm', 'IFCLENGTHMEASURE', ifcR(sum.allow)]);
+    rows.push(['偏芯_判定', 'IFCLABEL', ifcStr(sum.head.mag > sum.allow ? '要協議' : '合格')]);
+    rows.push(['偏芯_外挿距離_m', 'IFCREAL', ifcR(sum.head.dh_m)]);
+  }
+  if (t) {
+    rows.push(['傾斜_' + ax[0], 'IFCREAL', ifcR(t.tA)]);
+    rows.push(['傾斜_' + ax[1], 'IFCREAL', ifcR(t.tB)]);
+    rows.push(['傾斜_合成_度', 'IFCREAL', ifcR(t.deg)]);
+    rows.push(['傾斜_合成', 'IFCLABEL', ifcStr('1/' + t.ratio.toFixed(0))]);
+    rows.push(['傾斜_管理値', 'IFCLABEL', ifcStr('1/' + DB.settings.tiltN)]);
+    rows.push(['傾斜_判定', 'IFCLABEL', ifcStr(t.mag > lim ? '要協議' : '合格')]);
+    rows.push(['計測方法', 'IFCLABEL', ifcStr(viewMode(fin.meas.A).replace(/<[^>]*>/g, ''))]);
+    rows.push(['計測日時', 'IFCLABEL', ifcStr(new Date(fin.meas.at).toISOString())]);
+  }
+  if (sum.joint) rows.push(['継手_折れ角', 'IFCLABEL', ifcStr('1/' + sum.joint.ratio.toFixed(0))]);
+  return rows;
+}
+
 function buildIFC() {
   const L = [];                            // 実体の行
   let id = 0;
@@ -2820,52 +3108,19 @@ function buildIFC() {
       ['LoadBearing', 'IFCBOOLEAN', '.T.'],
     ], pile);
 
-    pset('Pset_SEKOBASE_PileSpec', [
+    pset('Pset_杭設計値', [
+      ['杭番号', 'IFCLABEL', ifcStr(p.no)],
       ['工法', 'IFCLABEL', ifcStr(p.method || '')],
-      ['鋼種', 'IFCLABEL', ifcStr(p.steel || '')],
+      ['材質', 'IFCLABEL', ifcStr(p.steel || '')],
       ['杭径_mm', 'IFCLENGTHMEASURE', ifcR(dia)],
-      ['肉厚_mm', 'IFCLENGTHMEASURE', ifcR(thick)],
+      ['板厚_mm', 'IFCLENGTHMEASURE', ifcR(thick)],
       ['杭長_m', 'IFCREAL', ifcR(p.len || null)],
-      ['設計杭頭深さ_GL下_m', 'IFCREAL', ifcR(p.headDepth || 0)],
+      ['杭天端', 'IFCLABEL', ifcStr('GL-' + Math.round((p.headDepth || 0) * 1000))],
       ['ヤットコ', 'IFCBOOLEAN', p.yat ? '.T.' : '.F.'],
     ].filter(x => x[2] !== '$'), pile);
 
-    const fin = sum.byStep.final, so = sum.byStep.setout;
-    const t = fin && fin.tilt;
-    const lim = 1 / DB.settings.tiltN;
-    const ax = axisNames();
-    const rows = [
-      ['基準軸', 'IFCLABEL', ifcStr(ax[0] + ' / ' + ax[1] +
-        (Math.abs(DB.settings.rodAngle - 90) > 0.01 ? '（成す角 ' + DB.settings.rodAngle + '°）' : ''))],
-    ];
-    if (so && so.meas.ecc && so.meas.ecc.r1 !== undefined) {
-      rows.push(['杭芯セット_読み1_mm', 'IFCLENGTHMEASURE', ifcR(so.meas.ecc.r1)]);
-      rows.push(['杭芯セット_読み2_mm', 'IFCLENGTHMEASURE', ifcR(so.meas.ecc.r2)]);
-    }
-    if (sum.absEcc) {
-      rows.push(['偏芯_' + ax[0] + '_mm', 'IFCLENGTHMEASURE', ifcR(sum.absEcc.eA)]);
-      rows.push(['偏芯_' + ax[1] + '_mm', 'IFCLENGTHMEASURE', ifcR(sum.absEcc.eB)]);
-    }
-    if (sum.head) {
-      rows.push(['杭頭偏芯_' + ax[0] + '_mm', 'IFCLENGTHMEASURE', ifcR(sum.head.hA)]);
-      rows.push(['杭頭偏芯_' + ax[1] + '_mm', 'IFCLENGTHMEASURE', ifcR(sum.head.hB)]);
-      rows.push(['杭頭偏芯_合成_mm', 'IFCLENGTHMEASURE', ifcR(sum.head.mag)]);
-      rows.push(['偏芯_許容_mm', 'IFCLENGTHMEASURE', ifcR(sum.allow)]);
-      rows.push(['偏芯_判定', 'IFCLABEL', ifcStr(sum.head.mag > sum.allow ? '要協議' : '合格')]);
-      rows.push(['偏芯_外挿距離_m', 'IFCREAL', ifcR(sum.head.dh_m)]);
-    }
-    if (t) {
-      rows.push(['傾斜_' + ax[0], 'IFCREAL', ifcR(t.tA)]);
-      rows.push(['傾斜_' + ax[1], 'IFCREAL', ifcR(t.tB)]);
-      rows.push(['傾斜_合成_度', 'IFCREAL', ifcR(t.deg)]);
-      rows.push(['傾斜_合成', 'IFCLABEL', ifcStr('1/' + t.ratio.toFixed(0))]);
-      rows.push(['傾斜_管理値', 'IFCLABEL', ifcStr('1/' + DB.settings.tiltN)]);
-      rows.push(['傾斜_判定', 'IFCLABEL', ifcStr(t.mag > lim ? '要協議' : '合格')]);
-      rows.push(['計測方法', 'IFCLABEL', ifcStr(viewMode(fin.meas.A).replace(/<[^>]*>/g, ''))]);
-      rows.push(['計測日時', 'IFCLABEL', ifcStr(new Date(fin.meas.at).toISOString())]);
-    }
-    if (sum.joint) rows.push(['継手_折れ角', 'IFCLABEL', ifcStr('1/' + sum.joint.ratio.toFixed(0))]);
-    if (rows.length > 1) pset('Pset_SEKOBASE_PileAsBuilt', rows, pile);
+    const rows = asBuiltRows(p);
+    if (rows.length > 1) pset('Pset_杭出来形', rows, pile);
   });
 
   if (piles.length)
@@ -2950,6 +3205,19 @@ $('#r-ifc').addEventListener('click', () => {
   download('sekobase_piles_' + new Date().toISOString().slice(0, 10) + '.ifc',
            buildIFC(), 'application/x-step');
   renderPiles();
+});
+
+$('#r-ifc-merge').addEventListener('click', async () => {
+  if (!IFCSRC.text) {
+    const saved = await ImgStore.get('ifc_source');
+    if (saved) IFCSRC.text = saved;
+  }
+  if (!IFCSRC.text) { toast('先に「IFCから取り込む」で元ファイルを読み込んでください'); return; }
+  const r = mergeIFC();
+  if (!r) return;
+  const base = (IFCSRC.name || 'piles.ifc').replace(/\.ifc$/i, '');
+  download(base + '_出来形.ifc', r.text, 'application/x-step');
+  toast(r.count + '本ぶんを書き戻しました');
 });
 
 $('#r-json').addEventListener('click', () => {
