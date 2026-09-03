@@ -229,6 +229,28 @@
     <div style="height:8px"></div>
     <button class="btn" id="p-bulk-go">一括登録</button>
   </div>
+
+  <div class="card">
+    <h2 style="margin-top:0">CAD図面（DXF）から取り込む</h2>
+    <div class="hint" style="margin-bottom:10px">杭伏図の円（杭）と文字（杭番号）を拾って杭リストを作ります。
+      円の中心が設計座標、円の直径が杭径になります。</div>
+    <button class="btn" id="dxf-pick">DXFファイルを選ぶ</button>
+    <input type="file" id="dxf-input" accept=".dxf,text/plain" style="display:none">
+    <div id="dxf-body" style="display:none;margin-top:12px">
+      <div id="dxf-info" class="hint" style="margin-bottom:10px"></div>
+      <div class="row">
+        <label class="f"><span>杭のレイヤ（円）</span><select id="dxf-lp"></select></label>
+        <label class="f"><span>杭番号のレイヤ（文字）</span><select id="dxf-lt"></select></label>
+      </div>
+      <div class="row">
+        <label class="f"><span>文字を探す距離 (mm)</span><input id="dxf-dist" type="number" value="1500"></label>
+        <label class="f"><span>設計杭頭深さ GL- (m)</span><input id="dxf-head" type="number" step="0.01" value="1.0"></label>
+      </div>
+      <canvas id="dxf-prev" style="width:100%;height:220px;background:#0d1117;border:1px solid var(--line);border-radius:8px"></canvas>
+      <div id="dxf-stat" class="hint" style="margin:8px 0"></div>
+      <button class="btn primary" id="dxf-go">この内容で取り込む</button>
+    </div>
+  </div>
 </section>
 
 <!-- ============ 計測 ============ -->
@@ -2506,6 +2528,167 @@ function renderRecords() {
     box.appendChild(c);
   });
 }
+
+/* =========================================================
+   DXF（杭伏図）から杭リストを起こす
+
+   設計モデルの IFC が無く CAD 図面しか無い現場が多いので、
+   図面から直接 杭番号・設計座標・杭径 を拾う。
+   杭は円（CIRCLE）または部品（INSERT）で描かれ、
+   杭番号は近くの文字（TEXT / MTEXT）で振られているのが普通なので、
+   その2つを距離で対応付ける。
+
+   ASCII DXF は「グループコードの行」「値の行」の繰り返し。
+   ENTITIES セクションだけを見れば足りる。
+   ========================================================= */
+
+function parseDXF(text) {
+  const L = text.split(/\r\n|\r|\n/);
+  const ents = [];
+  let i = 0, section = '', cur = null;
+  const flush = () => { if (cur && section === 'ENTITIES') ents.push(cur); cur = null; };
+
+  while (i + 1 < L.length) {
+    const code = parseInt(L[i].trim(), 10);
+    const raw = L[i + 1];
+    i += 2;
+    if (isNaN(code)) continue;
+    const v = raw === undefined ? '' : raw.trim();
+
+    if (code === 0) {
+      flush();
+      if (v === 'SECTION') { section = '?'; continue; }
+      if (v === 'ENDSEC') { section = ''; continue; }
+      if (v === 'EOF') break;
+      cur = { type: v };
+      continue;
+    }
+    if (section === '?' && code === 2) { section = v; continue; }
+    if (!cur) continue;
+
+    if (code === 8) cur.layer = v;
+    else if (code === 1 || code === 3) cur.text = (cur.text || '') + v;   // MTEXTは分割される
+    else if (code === 2) cur.block = v;
+    else if (code === 10) cur.x = parseFloat(v);
+    else if (code === 20) cur.y = parseFloat(v);
+    else if (code === 11) cur.x2 = parseFloat(v);
+    else if (code === 21) cur.y2 = parseFloat(v);
+    else if (code === 40) cur.size = parseFloat(v);   // CIRCLEは半径、TEXTは文字高さ
+  }
+  flush();
+  return ents;
+}
+
+/* MTEXT の書式指定を落として素の文字にする */
+function dxfText(t) {
+  return String(t || '')
+    .replace(/\\[A-Za-z][^;]*;/g, '')     // \fArial|b0; などの書式
+    .replace(/\\P/g, ' ')                 // 改行
+    .replace(/[{}]/g, '')
+    .trim();
+}
+
+const DXF = { ents: [], circles: [], texts: [], layers: [], matched: [] };
+
+function dxfLoad(text) {
+  DXF.ents = parseDXF(text);
+  DXF.circles = DXF.ents.filter(e => (e.type === 'CIRCLE' || e.type === 'INSERT') &&
+                                     isFinite(e.x) && isFinite(e.y));
+  DXF.texts = DXF.ents.filter(e => (e.type === 'TEXT' || e.type === 'MTEXT') &&
+                                   isFinite(e.x) && dxfText(e.text));
+  const count = (arr) => {
+    const m = {};
+    arr.forEach(e => { const k = e.layer || '0'; m[k] = (m[k] || 0) + 1; });
+    return Object.entries(m).sort((a, b) => b[1] - a[1]);
+  };
+  DXF.layers = { circle: count(DXF.circles), text: count(DXF.texts) };
+
+  const fill = (sel, rows, unit) => {
+    sel.innerHTML = rows.map(([n, c]) => '<option value="' + esc(n) + '">' +
+      esc(n) + '（' + c + unit + '）</option>').join('');
+  };
+  fill($('#dxf-lp'), DXF.layers.circle, '個');
+  fill($('#dxf-lt'), DXF.layers.text, '個');
+  $('#dxf-info').innerHTML = '図形 ' + DXF.ents.length + ' 件　うち 円/部品 ' + DXF.circles.length +
+    ' 件、文字 ' + DXF.texts.length + ' 件';
+  $('#dxf-body').style.display = 'block';
+  dxfMatch();
+}
+
+/* 円と文字を距離で対応付ける。円の中心＝設計座標、直径＝杭径。 */
+function dxfMatch() {
+  const lp = $('#dxf-lp').value, lt = $('#dxf-lt').value;
+  const maxD = parseFloat($('#dxf-dist').value) || 1500;
+  const cs = DXF.circles.filter(e => (e.layer || '0') === lp);
+  const ts = DXF.texts.filter(e => (e.layer || '0') === lt);
+  const used = new Set();
+  DXF.matched = cs.map(c => {
+    let best = null, bd = maxD;
+    ts.forEach((t, i) => {
+      if (used.has(i)) return;
+      const tx = isFinite(t.x2) && t.x2 !== 0 ? t.x2 : t.x;
+      const ty = isFinite(t.y2) && t.y2 !== 0 ? t.y2 : t.y;
+      const d = Math.hypot(tx - c.x, ty - c.y);
+      if (d < bd) { bd = d; best = i; }
+    });
+    if (best !== null) used.add(best);
+    return { x: c.x, y: c.y, dia: c.type === 'CIRCLE' && c.size > 0 ? c.size * 2 : null,
+             no: best !== null ? dxfText(ts[best].text) : null, d: best !== null ? bd : null };
+  });
+  const named = DXF.matched.filter(m => m.no);
+  const dias = named.map(m => m.dia).filter(d => d > 0);
+  $('#dxf-stat').innerHTML = '杭 ' + cs.length + ' 本中 <b>' + named.length + ' 本</b>に番号が付きました' +
+    (cs.length - named.length ? '　<span style="color:var(--warn)">未対応 ' + (cs.length - named.length) + ' 本</span>' : '') +
+    (dias.length ? '　杭径 φ' + fmt(Math.min(...dias), 1) +
+      (Math.max(...dias) - Math.min(...dias) > 1 ? '〜φ' + fmt(Math.max(...dias), 1) : '') : '');
+  dxfDraw();
+}
+
+function dxfDraw() {
+  const cv = $('#dxf-prev');
+  const w = cv.clientWidth || 320, h = 220, dpr = window.devicePixelRatio || 1;
+  cv.width = w * dpr; cv.height = h * dpr;
+  const c = cv.getContext('2d'); c.scale(dpr, dpr);
+  c.fillStyle = '#0d1117'; c.fillRect(0, 0, w, h);
+  const M = DXF.matched;
+  if (!M.length) return;
+  const xs = M.map(m => m.x), ys = M.map(m => m.y);
+  const x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys);
+  const pad = 22, sc = Math.min((w - pad * 2) / Math.max(x1 - x0, 1), (h - pad * 2) / Math.max(y1 - y0, 1));
+  const px = x => pad + (x - x0) * sc, py = y => h - pad - (y - y0) * sc;   // 図面のYは上向き
+  c.font = '9px sans-serif'; c.textAlign = 'center';
+  M.forEach(m => {
+    const r = Math.max(3, (m.dia || 400) / 2 * sc);
+    c.strokeStyle = m.no ? '#3fb950' : '#da3633'; c.lineWidth = 1.5;
+    c.beginPath(); c.arc(px(m.x), py(m.y), r, 0, Math.PI * 2); c.stroke();
+    if (m.no) { c.fillStyle = '#8b949e'; c.fillText(m.no, px(m.x), py(m.y) - r - 3); }
+  });
+}
+
+$('#dxf-pick').addEventListener('click', () => $('#dxf-input').click());
+$('#dxf-input').addEventListener('change', e => {
+  const f = e.target.files && e.target.files[0];
+  if (!f) return;
+  const rd = new FileReader();
+  rd.onload = ev => {
+    try { dxfLoad(ev.target.result); }
+    catch (err) { toast('DXFを読めませんでした'); }
+  };
+  rd.readAsText(f);
+});
+['#dxf-lp', '#dxf-lt'].forEach(id => $(id).addEventListener('change', dxfMatch));
+$('#dxf-dist').addEventListener('change', dxfMatch);
+
+$('#dxf-go').addEventListener('click', () => {
+  const head = parseFloat($('#dxf-head').value) || 0;
+  let n = 0, skip = 0;
+  DXF.matched.forEach(m => {
+    if (!m.no) { skip++; return; }
+    if (addPile(m.no, m.dia || 0, head, false, { x: m.x, y: m.y })) n++; else skip++;
+  });
+  renderPiles();
+  toast(n + '本を取り込みました' + (skip ? '（' + skip + '本は番号なし/重複で除外）' : ''));
+});
 
 /* =========================================================
    IFC 書き出し（IFC4）
