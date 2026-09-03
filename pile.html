@@ -201,6 +201,21 @@
         <select id="p-yat"><option value="0">使わない</option><option value="1">使う</option></select>
       </label>
     </div>
+    <details style="margin-bottom:10px">
+      <summary style="font-size:12px;color:#8b949e;padding:6px 0">詳細（IFC書き出し・黒板の内容）</summary>
+      <div class="row">
+        <label class="f"><span>設計座標 X (mm)</span><input id="p-x" type="number" inputmode="decimal" placeholder="任意"></label>
+        <label class="f"><span>設計座標 Y (mm)</span><input id="p-y" type="number" inputmode="decimal" placeholder="任意"></label>
+      </div>
+      <div class="row">
+        <label class="f"><span>杭長 (m)</span><input id="p-len" type="number" inputmode="decimal" step="0.1" placeholder="5.0"></label>
+        <label class="f"><span>肉厚 (mm)</span><input id="p-th" type="number" inputmode="decimal" step="0.1" placeholder="12.7"></label>
+      </div>
+      <div class="row">
+        <label class="f"><span>鋼種</span><input id="p-steel" placeholder="STK490"></label>
+        <label class="f"><span>工法</span><input id="p-method" placeholder="N-ECS"></label>
+      </div>
+    </details>
     <button class="btn primary" id="p-add">杭を追加</button>
   </div>
 
@@ -208,7 +223,8 @@
   <div id="p-list"></div>
 
   <div class="card">
-    <div class="hint" style="margin-bottom:8px">CSV貼り付けで一括登録（<b>杭番号,杭径mm,設計杭頭深さm,ヤットコ0/1</b> を1行1杭）</div>
+    <div class="hint" style="margin-bottom:8px">CSV貼り付けで一括登録<br>
+      <b>杭番号,杭径mm,設計杭頭深さm,ヤットコ0/1,設計X,設計Y,杭長m,肉厚mm,鋼種,工法</b>（5列目以降は任意）</div>
     <textarea id="p-bulk" placeholder="P-1,267.4,1.5,1&#10;P-2,267.4,1.5,1"></textarea>
     <div style="height:8px"></div>
     <button class="btn" id="p-bulk-go">一括登録</button>
@@ -242,6 +258,8 @@
     <button class="btn" id="r-csv">CSVを書き出す</button>
     <div style="height:8px"></div>
     <button class="btn" id="r-json">JSONを書き出す（地盤MAP取り込み用）</button>
+    <div style="height:8px"></div>
+    <button class="btn" id="r-ifc">IFCを書き出す（BIMモデル連携）</button>
   </div>
 </section>
 
@@ -758,18 +776,25 @@ function goTab(name) { const b = $$('nav.tabs button').find(x => x.dataset.tab =
 /* =========================================================
    UI: 杭リスト
    ========================================================= */
-function addPile(no, dia, headDepth, yat) {
+function addPile(no, dia, headDepth, yat, ext) {
   if (!no) { toast('杭番号を入力してください'); return null; }
   if (DB.piles.some(p => p.no === no)) { toast('同じ杭番号があります: ' + no); return null; }
-  const p = { id: uid(), no, dia: dia || 0, headDepth: headDepth || 0, yat: !!yat, at: Date.now() };
+  const p = Object.assign({ id: uid(), no, dia: dia || 0, headDepth: headDepth || 0,
+                            yat: !!yat, at: Date.now() }, ext || {});
   DB.piles.push(p); saveDB(); return p;
 }
+const numOr = v => { const n = parseFloat(v); return isFinite(n) ? n : null; };
 
 $('#p-add').addEventListener('click', () => {
   const p = addPile($('#p-no').value.trim(), parseFloat($('#p-dia').value),
-                    parseFloat($('#p-head').value), $('#p-yat').value === '1');
+                    parseFloat($('#p-head').value), $('#p-yat').value === '1', {
+    x: numOr($('#p-x').value), y: numOr($('#p-y').value),
+    len: numOr($('#p-len').value), thick: numOr($('#p-th').value),
+    steel: $('#p-steel').value.trim(), method: $('#p-method').value.trim(),
+  });
   if (!p) return;
-  $('#p-no').value = ''; renderPiles(); toast(p.no + ' を追加しました');
+  $('#p-no').value = ''; $('#p-x').value = ''; $('#p-y').value = '';
+  renderPiles(); toast(p.no + ' を追加しました');
 });
 
 $('#p-bulk-go').addEventListener('click', () => {
@@ -777,7 +802,10 @@ $('#p-bulk-go').addEventListener('click', () => {
   let n = 0;
   lines.forEach(l => {
     const c = l.split(',').map(s => s.trim());
-    if (addPile(c[0], parseFloat(c[1]), parseFloat(c[2]), c[3] === '1')) n++;
+    if (addPile(c[0], parseFloat(c[1]), parseFloat(c[2]), c[3] === '1', {
+      x: numOr(c[4]), y: numOr(c[5]), len: numOr(c[6]), thick: numOr(c[7]),
+      steel: (c[8] || '').trim(), method: (c[9] || '').trim(),
+    })) n++;
   });
   $('#p-bulk').value = ''; renderPiles(); toast(n + '本を登録しました');
 });
@@ -2479,6 +2507,202 @@ function renderRecords() {
   });
 }
 
+/* =========================================================
+   IFC 書き出し（IFC4）
+
+   杭1本を完全に記述するには2つの軸の記録が要る。
+     ・深さ方向／地中 … 深度、トルク、支持層到達（杭打機側の施工管理装置）
+     ・水平方向／地上 … 偏芯、傾斜（このアプリ）
+   IfcPile がその合流点になるので、計測値をプロパティセットとして
+   杭に貼り付けた IFC を出す。設計モデルと突き合わせる鍵は杭番号なので、
+   Pset_PileCommon.Reference と Name / Tag の3か所に同じ値を入れておく。
+
+   GUID は杭ごとに固定して台帳に持たせる。書き出すたびに変わると
+   上流のモデルと結び直せなくなるため。
+   ========================================================= */
+
+const IFC_B64 = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_$';
+/* IFCのGUIDは22文字。先頭だけ2bit分なので 0〜3 に限る（128bitに収まるように） */
+function ifcGuid() {
+  let g = '0123'[Math.floor(Math.random() * 4)];
+  for (let i = 0; i < 21; i++) g += IFC_B64[Math.floor(Math.random() * 64)];
+  return g;
+}
+function pileGuid(p) {
+  if (!p.ifcGuid) { p.ifcGuid = ifcGuid(); saveDB(); }
+  return p.ifcGuid;
+}
+
+/* ISO-10303-21 の文字列。非ASCIIは \X2\<UTF-16BEの16進>\X0\ で表す */
+function ifcStr(v) {
+  const s = String(v == null ? '' : v).replace(/\\/g, '\\\\').replace(/'/g, "''");
+  let out = '', buf = '';
+  const flush = () => { if (buf) { out += '\\X2\\' + buf + '\\X0\\'; buf = ''; } };
+  for (const ch of s) {
+    if (ch.codePointAt(0) < 128) { flush(); out += ch; }
+    else for (let i = 0; i < ch.length; i++)
+      buf += ch.charCodeAt(i).toString(16).toUpperCase().padStart(4, '0');
+  }
+  flush();
+  return "'" + out + "'";
+}
+const ifcR = v => {                       // IFCのREALは必ず小数点を含む
+  if (v === null || v === undefined || !isFinite(v)) return '$';
+  const s = Number(v).toPrecision(12).replace(/0+$/, '').replace(/\.$/, '.0');
+  return s.includes('.') || s.includes('E') ? s : s + '.';
+};
+
+function buildIFC() {
+  const L = [];                            // 実体の行
+  let id = 0;
+  const put = txt => { L.push('#' + (++id) + '=' + txt + ';'); return '#' + id; };
+  const now = Math.floor(Date.now() / 1000);
+
+  const person = put('IFCPERSON($,$,' + ifcStr('SEKOBASE') + ',$,$,$,$,$)');
+  const org    = put('IFCORGANIZATION($,' + ifcStr('SEKOBASE') + ',$,$,$)');
+  const pao    = put('IFCPERSONANDORGANIZATION(' + person + ',' + org + ',$)');
+  const app    = put('IFCAPPLICATION(' + org + ',' + ifcStr('1.0') + ',' +
+                     ifcStr('SEKOBASE 杭計測') + ',' + ifcStr('SEKOBASE-PILE') + ')');
+  const own    = put('IFCOWNERHISTORY(' + pao + ',' + app + ',$,.ADDED.,$,$,$,' + now + ')');
+
+  const dirZ = put('IFCDIRECTION((0.,0.,1.))');
+  const dirX = put('IFCDIRECTION((1.,0.,0.))');
+  const dirDn = put('IFCDIRECTION((0.,0.,-1.))');
+  const org3 = put('IFCCARTESIANPOINT((0.,0.,0.))');
+  const org2 = put('IFCCARTESIANPOINT((0.,0.))');
+  const ax3  = put('IFCAXIS2PLACEMENT3D(' + org3 + ',' + dirZ + ',' + dirX + ')');
+  const ax2  = put('IFCAXIS2PLACEMENT2D(' + org2 + ',$)');
+  const ctx  = put('IFCGEOMETRICREPRESENTATIONCONTEXT($,' + ifcStr('Model') + ',3,1.E-05,' + ax3 + ',$)');
+  const body = put('IFCGEOMETRICREPRESENTATIONSUBCONTEXT(' + ifcStr('Body') + ',' + ifcStr('Model') +
+                   ',*,*,*,*,' + ctx + ',$,.MODEL_VIEW.,$)');
+
+  const uL = put('IFCSIUNIT(*,.LENGTHUNIT.,.MILLI.,.METRE.)');
+  const uA = put('IFCSIUNIT(*,.AREAUNIT.,$,.SQUARE_METRE.)');
+  const uV = put('IFCSIUNIT(*,.VOLUMEUNIT.,$,.CUBIC_METRE.)');
+  const uP = put('IFCSIUNIT(*,.PLANEANGLEUNIT.,$,.RADIAN.)');
+  const units = put('IFCUNITASSIGNMENT((' + [uL, uA, uV, uP].join(',') + '))');
+
+  const proj = put('IFCPROJECT(' + ifcStr(ifcGuid()) + ',' + own + ',' + ifcStr('SEKOBASE 杭計測') +
+                   ',$,$,$,$,(' + ctx + '),' + units + ')');
+  const plSite = put('IFCLOCALPLACEMENT($,' + ax3 + ')');
+  const site = put('IFCSITE(' + ifcStr(ifcGuid()) + ',' + own + ',' + ifcStr('敷地') +
+                   ',$,$,' + plSite + ',$,$,.ELEMENT.,$,$,$,$,$)');
+  const plBld = put('IFCLOCALPLACEMENT(' + plSite + ',' + ax3 + ')');
+  const bld = put('IFCBUILDING(' + ifcStr(ifcGuid()) + ',' + own + ',' + ifcStr('建物') +
+                  ',$,$,' + plBld + ',$,$,.ELEMENT.,$,$,$)');
+  const plSt = put('IFCLOCALPLACEMENT(' + plBld + ',' + ax3 + ')');
+  const storey = put('IFCBUILDINGSTOREY(' + ifcStr(ifcGuid()) + ',' + own + ',' + ifcStr('基礎') +
+                     ',$,$,' + plSt + ',$,$,.ELEMENT.,0.)');
+  put('IFCRELAGGREGATES(' + ifcStr(ifcGuid()) + ',' + own + ',$,$,' + proj + ',(' + site + '))');
+  put('IFCRELAGGREGATES(' + ifcStr(ifcGuid()) + ',' + own + ',$,$,' + site + ',(' + bld + '))');
+  put('IFCRELAGGREGATES(' + ifcStr(ifcGuid()) + ',' + own + ',$,$,' + bld + ',(' + storey + '))');
+
+  /* プロパティセットを1つ作って杭に結び付ける */
+  const pset = (name, props, target) => {
+    const refs = props.filter(x => x).map(([n, type, v]) =>
+      put('IFCPROPERTYSINGLEVALUE(' + ifcStr(n) + ',$,' + type + '(' + v + '),$)'));
+    if (!refs.length) return;
+    const ps = put('IFCPROPERTYSET(' + ifcStr(ifcGuid()) + ',' + own + ',' + ifcStr(name) +
+                   ',$,(' + refs.join(',') + '))');
+    put('IFCRELDEFINESBYPROPERTIES(' + ifcStr(ifcGuid()) + ',' + own + ',$,$,(' + target + '),' + ps + ')');
+  };
+
+  const piles = [];
+  DB.piles.forEach((p, i) => {
+    const sum = pileSummary(p.id);
+    const dia = p.dia > 0 ? p.dia : 400;
+    const thick = p.thick > 0 ? p.thick : 12.7;
+    const len = (p.len > 0 ? p.len : 5) * 1000;
+    const hd = (p.headDepth || 0) * 1000;
+    const px = p.x !== null && p.x !== undefined ? p.x : (i % 10) * 2000;   // 座標が無ければ並べる
+    const py = p.y !== null && p.y !== undefined ? p.y : Math.floor(i / 10) * 2000;
+
+    const loc = put('IFCCARTESIANPOINT((' + ifcR(px) + ',' + ifcR(py) + ',' + ifcR(-hd) + '))');
+    const axp = put('IFCAXIS2PLACEMENT3D(' + loc + ',' + dirZ + ',' + dirX + ')');
+    const plc = put('IFCLOCALPLACEMENT(' + plSt + ',' + axp + ')');
+    const prof = put('IFCCIRCLEHOLLOWPROFILEDEF(.AREA.,' + ifcStr('φ' + dia + 'x' + thick) + ',' +
+                     ax2 + ',' + ifcR(dia / 2) + ',' + ifcR(thick) + ')');
+    const solid = put('IFCEXTRUDEDAREASOLID(' + prof + ',' + ax3 + ',' + dirDn + ',' + ifcR(len) + ')');
+    const shp = put('IFCSHAPEREPRESENTATION(' + body + ',' + ifcStr('Body') + ',' +
+                    ifcStr('SweptSolid') + ',(' + solid + '))');
+    const pds = put('IFCPRODUCTDEFINITIONSHAPE($,$,(' + shp + '))');
+    const pile = put('IFCPILE(' + ifcStr(pileGuid(p)) + ',' + own + ',' + ifcStr(p.no) + ',$,' +
+                     ifcStr(p.method || '回転圧入鋼管杭') + ',' + plc + ',' + pds + ',' +
+                     ifcStr(p.no) + ',.DRIVEN.,$)');
+    piles.push(pile);
+
+    pset('Pset_PileCommon', [
+      ['Reference', 'IFCIDENTIFIER', ifcStr(p.no)],
+      ['Status', 'IFCLABEL', ifcStr(sum.head ? 'AS_BUILT' : 'NEW')],
+      ['LoadBearing', 'IFCBOOLEAN', '.T.'],
+    ], pile);
+
+    pset('Pset_SEKOBASE_PileSpec', [
+      ['工法', 'IFCLABEL', ifcStr(p.method || '')],
+      ['鋼種', 'IFCLABEL', ifcStr(p.steel || '')],
+      ['杭径_mm', 'IFCLENGTHMEASURE', ifcR(dia)],
+      ['肉厚_mm', 'IFCLENGTHMEASURE', ifcR(thick)],
+      ['杭長_m', 'IFCREAL', ifcR(p.len || null)],
+      ['設計杭頭深さ_GL下_m', 'IFCREAL', ifcR(p.headDepth || 0)],
+      ['ヤットコ', 'IFCBOOLEAN', p.yat ? '.T.' : '.F.'],
+    ].filter(x => x[2] !== '$'), pile);
+
+    const fin = sum.byStep.final, so = sum.byStep.setout;
+    const t = fin && fin.tilt;
+    const lim = 1 / DB.settings.tiltN;
+    const ax = axisNames();
+    const rows = [
+      ['基準軸', 'IFCLABEL', ifcStr(ax[0] + ' / ' + ax[1] +
+        (Math.abs(DB.settings.rodAngle - 90) > 0.01 ? '（成す角 ' + DB.settings.rodAngle + '°）' : ''))],
+    ];
+    if (so && so.meas.ecc && so.meas.ecc.r1 !== undefined) {
+      rows.push(['杭芯セット_読み1_mm', 'IFCLENGTHMEASURE', ifcR(so.meas.ecc.r1)]);
+      rows.push(['杭芯セット_読み2_mm', 'IFCLENGTHMEASURE', ifcR(so.meas.ecc.r2)]);
+    }
+    if (sum.absEcc) {
+      rows.push(['偏芯_' + ax[0] + '_mm', 'IFCLENGTHMEASURE', ifcR(sum.absEcc.eA)]);
+      rows.push(['偏芯_' + ax[1] + '_mm', 'IFCLENGTHMEASURE', ifcR(sum.absEcc.eB)]);
+    }
+    if (sum.head) {
+      rows.push(['杭頭偏芯_' + ax[0] + '_mm', 'IFCLENGTHMEASURE', ifcR(sum.head.hA)]);
+      rows.push(['杭頭偏芯_' + ax[1] + '_mm', 'IFCLENGTHMEASURE', ifcR(sum.head.hB)]);
+      rows.push(['杭頭偏芯_合成_mm', 'IFCLENGTHMEASURE', ifcR(sum.head.mag)]);
+      rows.push(['偏芯_許容_mm', 'IFCLENGTHMEASURE', ifcR(sum.allow)]);
+      rows.push(['偏芯_判定', 'IFCLABEL', ifcStr(sum.head.mag > sum.allow ? '要協議' : '合格')]);
+      rows.push(['偏芯_外挿距離_m', 'IFCREAL', ifcR(sum.head.dh_m)]);
+    }
+    if (t) {
+      rows.push(['傾斜_' + ax[0], 'IFCREAL', ifcR(t.tA)]);
+      rows.push(['傾斜_' + ax[1], 'IFCREAL', ifcR(t.tB)]);
+      rows.push(['傾斜_合成_度', 'IFCREAL', ifcR(t.deg)]);
+      rows.push(['傾斜_合成', 'IFCLABEL', ifcStr('1/' + t.ratio.toFixed(0))]);
+      rows.push(['傾斜_管理値', 'IFCLABEL', ifcStr('1/' + DB.settings.tiltN)]);
+      rows.push(['傾斜_判定', 'IFCLABEL', ifcStr(t.mag > lim ? '要協議' : '合格')]);
+      rows.push(['計測方法', 'IFCLABEL', ifcStr(viewMode(fin.meas.A).replace(/<[^>]*>/g, ''))]);
+      rows.push(['計測日時', 'IFCLABEL', ifcStr(new Date(fin.meas.at).toISOString())]);
+    }
+    if (sum.joint) rows.push(['継手_折れ角', 'IFCLABEL', ifcStr('1/' + sum.joint.ratio.toFixed(0))]);
+    if (rows.length > 1) pset('Pset_SEKOBASE_PileAsBuilt', rows, pile);
+  });
+
+  if (piles.length)
+    put('IFCRELCONTAINEDINSPATIALSTRUCTURE(' + ifcStr(ifcGuid()) + ',' + own + ',$,$,(' +
+        piles.join(',') + '),' + storey + ')');
+
+  const stamp = new Date().toISOString().replace(/\.\d+Z$/, '');
+  return [
+    'ISO-10303-21;',
+    'HEADER;',
+    "FILE_DESCRIPTION(('ViewDefinition [ReferenceView_V1.2]'),'2;1');",
+    'FILE_NAME(' + ifcStr('sekobase_piles.ifc') + ',' + ifcStr(stamp) + ',(' + ifcStr('SEKOBASE') +
+      '),(' + ifcStr('SEKOBASE') + '),' + ifcStr('SEKOBASE 杭計測') + ',' +
+      ifcStr('SEKOBASE 杭計測') + ',' + ifcStr('') + ');',
+    "FILE_SCHEMA(('IFC4'));",
+    'ENDSEC;',
+    'DATA;',
+  ].concat(L).concat(['ENDSEC;', 'END-ISO-10303-21;', '']).join('\n');
+}
+
 function download(name, text, mime) {
   const blob = new Blob([text], { type: mime + ';charset=utf-8' });
   const a = document.createElement('a');
@@ -2536,6 +2760,13 @@ $('#r-csv').addEventListener('click', () => {
     return /[",\n]/.test(s2) ? '"' + s2.replace(/"/g, '""') + '"' : s2;
   }).join(',')).join('\r\n');
   download('sekobase_pile_' + new Date().toISOString().slice(0, 10) + '.csv', csv, 'text/csv');
+});
+
+$('#r-ifc').addEventListener('click', () => {
+  if (!DB.piles.length) { toast('杭が登録されていません'); return; }
+  download('sekobase_piles_' + new Date().toISOString().slice(0, 10) + '.ifc',
+           buildIFC(), 'application/x-step');
+  renderPiles();
 });
 
 $('#r-json').addEventListener('click', () => {
