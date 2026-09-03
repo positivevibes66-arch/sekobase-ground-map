@@ -1162,6 +1162,24 @@ $('#m-change').addEventListener('click', () => goTab('piles'));
 let camStream = null, camCtx = null, camRAF = 0;
 let capTarget = null;      // { pile, step, view }
 
+async function lockCamera(stream) {
+  const tr = stream.getVideoTracks()[0];
+  if (!tr || !tr.getCapabilities) return '固定不可（この端末では設定できません）';
+  let caps = {};
+  try { caps = tr.getCapabilities() || {}; } catch (e) { return '固定不可'; }
+  const done = [];
+  const tryMode = async (key, want) => {
+    const list = caps[key];
+    if (!Array.isArray(list) || !list.includes(want)) return;
+    try { await tr.applyConstraints({ advanced: [{ [key]: want }] }); done.push(key.replace('Mode', '')); }
+    catch (e) { /* 対応していない端末では無視する */ }
+  };
+  await tryMode('focusMode', 'manual');
+  await tryMode('exposureMode', 'manual');
+  await tryMode('whiteBalanceMode', 'manual');
+  return done.length ? '固定: ' + done.join(' / ') : '固定不可（自動のまま）';
+}
+
 async function startCapture(pile, step, view) {
   if (!Sensor.ok) {
     const ok = await Sensor.requestPermission();
@@ -1181,6 +1199,11 @@ async function startCapture(pile, step, view) {
   } catch (e) {
     toast('カメラを起動できません（HTTPS と権限を確認してください）'); return;
   }
+  /* 計測中はピント・露出・ホワイトバランスを固定する。
+     オートフォーカスが動くと焦点距離がわずかに変わり（フォーカスブリージング）、
+     mm/px のスケールが揺れて偏芯に直接効く。対応していない機種では何も起きない。 */
+  VF.lockInfo = await lockCamera(camStream);
+
   const v = $('#cam-video');
   v.srcObject = camStream;
   await v.play().catch(() => {});
@@ -1201,6 +1224,7 @@ async function startCapture(pile, step, view) {
   $('#cam-single').style.display = camMode === 'single' ? 'block' : 'none';
   $('#cam-cont').style.display   = camMode === 'cont'   ? 'block' : 'none';
   $('#cont-dur').textContent = (Cont.dur / 1000) + '秒';
+  $('#cam-sub').textContent = pile.no + ' — スマホを鉛直に構え、杭を画面中央に　' + (VF.lockInfo || '');
   loopCam();
 }
 
@@ -1786,7 +1810,8 @@ function showContResult() {
 }
 
 /* 傾斜の時系列。首振りの振幅がそのまま波形として見える */
-function drawSpark(cv, r) {
+function drawSpark(cv, r, unit) {
+  if (!cv) return;
   const w = cv.clientWidth || 320, h = 44;
   cv.width = w * (window.devicePixelRatio || 1);
   cv.height = h * (window.devicePixelRatio || 1);
@@ -1811,7 +1836,7 @@ function drawSpark(cv, r) {
   });
   c.stroke();
   c.fillStyle = '#8b949e'; c.font = '10px sans-serif';
-  c.fillText('振れ幅 ' + fmt(hi - lo, 3) + '°', 4, 11);
+  c.fillText('振れ幅 ' + fmt(hi - lo, unit === 'mm' ? 0 : 3) + (unit || '°'), 4, 11);
 }
 
 function resetContUI() {
@@ -2135,7 +2160,8 @@ function vfMsg() {
   parts.push(VF.edgesSet
     ? '② エッジ ✓（縦 ' + Math.round(Guides.yTop * 100) + '〜' + Math.round(Guides.yBot * 100) + '%）'
     : '② エッジ — 未設定');
-  parts.push(VF.designPt ? '③ 設計芯 ✓' : '③ 設計芯 — 未設定（傾斜のみ）');
+  parts.push(VF.designPt ? '③ 設計芯 ✓（絶対量）'
+    : (VF.vertSet ? '③ 設計芯 — 不要（<b>基準からの移動量で監視</b>）' : '③ 設計芯 — 未設定'));
   $('#vf-msg').innerHTML = parts.join('　/　');
   $('#vf-run').disabled = !VF.edgesSet || VF.running;
 }
@@ -2194,8 +2220,8 @@ $('#vf-design').addEventListener('click', () => {
   if (!(capTarget.pile.dia > 0)) { toast('杭径が未登録です。杭リストで杭径を入れてください'); return; }
   openMark(VF.seed, VF.grav, {
     n: 1, guide: ['<b>設計芯</b>の位置を長押しで合わせる（逃げ杭からの水糸、地面のマークなど）'],
-    title: '設計芯を指定',
-    sub: '杭の中心線をこの高さで評価して偏芯を出します',
+    title: '設計芯を指定（任意）',
+    sub: '杭芯セットから撮っているなら指定不要です',
     preview: pts => '杭の中心線との差を、この点の高さで測ります',
     onDone: pts => { VF.designPt = { x: pts[0].x, y: pts[0].y }; closeMark(); vfMsg(); },
   });
@@ -2258,8 +2284,16 @@ async function runVideo() {
     if (meta) lastMediaTime = meta.mediaTime;
     workCtx.drawImage(v, 0, 0);
 
-    // 鉛直基準を毎フレーム追い、カメラのロールを打ち消す
-    let grav = VF.grav;
+    /* 基準（逃げ棒など画角内の動かない鉛直物）を毎フレーム追う。
+       角度はカメラのロールを打ち消すのに使い、
+       水平位置は偏芯を「基準からの相対」で測るのに使う。
+
+       絶対座標で測ると、カメラのヨーが 0.057° ずれただけで
+       10m先では 10mm の誤差になる。三脚の脚が 1mm 沈めば使い切る量で、
+       軟弱地盤で杭打機が動いている横では保てない。
+       基準との相対にすれば、カメラが 20mm 動いても誤差は数 mm に収まる
+       （基準と杭が同じ距離にあれば理屈の上ではゼロ）。 */
+    let grav = VF.grav, refX = null, yEval = null;
     if (VF.ref && VF.ref.ok) {
       const rf = trackLine(workCtx, VF.refModel || VF.ref.base,
                            VF.ref.yTop, VF.ref.yBot, VF.refModel ? WIN_LOCK : WIN_WIDE,
@@ -2268,6 +2302,9 @@ async function runVideo() {
         VF.refModel = rf;
         grav = gravFromLine(rf, VF.ref.yTop, VF.ref.yBot);
         VF.refRolls.push(grav.roll);
+        // 杭と基準を同じ画面の高さで比べる（外挿しないので誤差が乗らない）
+        yEval = (VF.ref.yTop + VF.ref.yBot) / 2;
+        refX = rf.a + rf.b * (yEval - rf.ym);
       } else { VF.refModel = null; VF.refLost++; }
     }
     const f = trackFrame(workCtx, grav, VF.model);
@@ -2276,7 +2313,8 @@ async function runVideo() {
       const dp = VF.designPt;
       VF.samples.push({ t: v.currentTime * 1000, angle: f.angle,
                         edgeDiff: Math.abs(f.angleL - f.angleR), midX: f.midX, pitch: 0, edges: f.edges,
-                        width: f.width, cx: dp ? f.centerAt(dp.y) : null });
+                        width: f.width, cx: dp ? f.centerAt(dp.y) : null,
+                        refX, relX: (refX !== null) ? f.centerAt(yEval) - refX : null });
     } else { VF.rejected++; VF.model = nextLost(VF.model); }
 
     if (isFinite(v.duration) && v.duration > 0)
@@ -2327,10 +2365,28 @@ function finishVideo() {
     widthSrc: useTracked ? 'tracked' : 'seed', widthIqr: isFinite(iqr) ? iqr : null,
     durMs: S.length ? S[S.length - 1].t - S[0].t : 0,
   };
-  /* 偏芯: 同じ画面の中で「杭の中心線」と「設計芯」の距離を測るので、
-     カメラが動いても相対量は変わらない（補正が要らない）。
-     mm への換算は杭径÷見かけの幅。 */
+  /* 偏芯監視: 基準（逃げ棒）に対する杭の位置の、開始時からの変化を追う。
+     杭芯セット直後から撮り始めれば、その変化がそのまま偏芯になる。
+     同じ画面の中の相対量なので、三脚がわずかに動いても打ち消される。 */
   const dia = capTarget.pile.dia;
+  if (widthPx && dia > 0) {
+    const rel = S.filter(x => x.relX !== null && isFinite(x.relX));
+    if (rel.length >= 5) {
+      const mmpx = dia / widthPx;
+      const mid = a => { const b = a.slice().sort((x, y) => x - y); return b[Math.floor(b.length / 2)]; };
+      const k = Math.min(9, rel.length);
+      const d0 = mid(rel.slice(0, k).map(x => x.relX));       // 原点は最初の数フレームの中央値
+      const dEnd = mid(rel.slice(-k).map(x => x.relX));
+      const mm = rel.map(x => [Math.round(x.t), +((x.relX - d0) * mmpx).toFixed(2)]);
+      const vals = mm.map(v => v[1]);
+      extra.mon = {
+        n: rel.length, mmPerPx: mmpx, end: (dEnd - d0) * mmpx,
+        max: Math.max(...vals.map(Math.abs)),
+        range: Math.max(...vals) - Math.min(...vals),
+        series: mm.length > 200 ? mm.filter((_, i) => i % Math.ceil(mm.length / 200) === 0) : mm,
+      };
+    }
+  }
   if (VF.designPt && widthPx && dia > 0) {
     const cx = med(S.map(s => s.cx));
     if (cx !== null) {
@@ -2343,19 +2399,31 @@ function finishVideo() {
       extra.eccSd = Math.sqrt(cs.reduce((a, b) => a + (b - m) ** 2, 0) / cs.length) * mmpx;
     }
   }
+  if (extra.eccMm === undefined && extra.mon) {
+    extra.eccMm = extra.mon.end;          // 開始時（杭芯セット）からの移動量
+    extra.eccSd = null;
+    extra.mmPerPx = extra.mon.mmPerPx;
+  }
   VF.result = buildViewFromSamples(S, workCv.width, extra);
   $('#vf-live').style.display = 'none';
   $('#vf-result').style.display = 'block';
   const span = (S[S.length - 1].t - S[0].t) / 1000;
   const r = VF.result;
-  const eccHTML = r.eccMm === undefined ? '' :
+  const monHTML = !r.mon ? '' :
+    '<div style="margin-top:6px;padding-top:6px;border-top:1px solid var(--line)">' +
+    '<b style="font-size:16px">開始時からの移動 ' + (r.mon.end >= 0 ? '+' : '') + fmt(r.mon.end, 0) + ' mm</b>' +
+    '<span style="color:var(--dim);font-size:11px"> （基準からの相対・この視点の1成分）</span><br>' +
+    '<span style="color:var(--dim);font-size:11px">最大 ' + fmt(r.mon.max, 0) + 'mm　振れ幅 ' +
+    fmt(r.mon.range, 0) + 'mm　' + r.mon.n + 'フレーム　' + fmt(r.mon.mmPerPx, 3) + ' mm/px</span>' +
+    '<canvas class="spark" id="vf-monspark"></canvas></div>';
+  const eccHTML = (r.eccMm === undefined || r.mon) ? '' :
     '<div style="margin-top:6px;padding-top:6px;border-top:1px solid var(--line)">' +
     '<b style="font-size:16px">偏芯 ' + (r.eccMm >= 0 ? '右へ ' : '左へ ') + fmt(Math.abs(r.eccMm), 0) + ' mm</b>' +
     '<span style="color:var(--dim);font-size:11px"> （この視点の1成分）</span><br>' +
     '<span style="color:var(--dim);font-size:11px">見かけの幅 ' + fmt(r.widthPx, 1) + 'px' +
     (r.widthSrc === 'seed' ? '（指定したエッジ間隔）' : '（追跡値）') + ' = φ' +
     capTarget.pile.dia + 'mm → ' + fmt(r.mmPerPx, 3) + ' mm/px　ばらつき ±' + fmt(r.eccSd, 1) + 'mm</span></div>';
-  $('#vf-rmsg').innerHTML = resultHTML(VF.result) + eccHTML +
+  $('#vf-rmsg').innerHTML = resultHTML(VF.result) + monHTML + eccHTML +
     '<div style="color:var(--dim);font-size:11px;margin-top:4px">' +
     fmt(span, 1) + '秒ぶんを ' + VF.rate + '倍速で解析（実効 ' + fmt(S.length / (span || 1), 1) + ' fps）<br>' +
     (VF.vertSet
@@ -2368,6 +2436,12 @@ function finishVideo() {
           : '')
       : '画像の鉛直を使用（カメラが動いていない前提。手持ちなら① 鉛直基準を指定してください）') + '</div>';
   drawSpark($('#vf-spark'), VF.result);
+  if (r.mon) {
+    const vals = r.mon.series.map(v => v[1]);
+    const mean = vals.reduce((a, b) => a + b, 0) / vals.length;
+    drawSpark($('#vf-monspark'), { series: r.mon.series, angle: mean,
+      sd: Math.sqrt(vals.reduce((a, b) => a + (b - mean) ** 2, 0) / vals.length) }, 'mm');
+  }
 }
 
 /* =========================================================

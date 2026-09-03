@@ -39,6 +39,8 @@ function serve() {
 
 const TRUE_DEG = 0.42;   // 真の傾斜（画像の鉛直から）
 const WOBBLE   = 0.30;   // 首振り振幅
+const CAM_DRIFT_PX = 25; // 三脚のドリフト（軟弱地盤を想定）
+const PILE_MOVE_PX = 16; // 杭そのものの横移動
 
 (async () => {
   const server = await serve();
@@ -60,7 +62,7 @@ const WOBBLE   = 0.30;   // 首振り振幅
   await p.click('.pile-item [data-act="sel"]');
 
   // --- 合成動画を生成して #vf-input に流し込む ---
-  const gen = await p.evaluate(async ({ TRUE_DEG, WOBBLE }) => {
+  const gen = await p.evaluate(async ({ TRUE_DEG, WOBBLE, CAM_DRIFT_PX, PILE_MOVE_PX }) => {
     const W = 640, H = 480, FPS = 30, SEC = 3;
     const cv = document.createElement('canvas'); cv.width = W; cv.height = H;
     const g = cv.getContext('2d');
@@ -70,26 +72,31 @@ const WOBBLE   = 0.30;   // 首振り振幅
     rec.ondataavailable = e => e.data.size && chunks.push(e.data);
     const done = new Promise(r => rec.onstop = r);
 
-    const hw = 34, xc = W / 2;
+    const hw = 34, xc = W / 2, refX0 = 120, refHw = 11;
     let frame = 0;
     const total = FPS * SEC;
     const draw = () => {
-      const wob = WOBBLE * Math.sin(2 * Math.PI * frame / 25);   // 25フレームで1回転
+      const prog = frame / total;
+      const cam = CAM_DRIFT_PX * prog;                            // 三脚が少しずつ動く
+      // 杭は途中で横に動く（0 → PILE_MOVE_PX）
+      const mv = PILE_MOVE_PX * Math.min(1, Math.max(0, (prog - 0.3) / 0.4));
+      const wob = WOBBLE * Math.sin(2 * Math.PI * frame / 25);
       const slope = -Math.tan((TRUE_DEG + wob) * Math.PI / 180);
-      g.fillStyle = '#c8c8c8'; g.fillRect(0, 0, W, H);           // 明るい背景
-      // 背景の模様（追跡がここに引っかからないことの確認も兼ねる）
+      g.fillStyle = '#c8c8c8'; g.fillRect(0, 0, W, H);
       g.fillStyle = '#b0b0b0';
-      for (let i = 0; i < 6; i++) g.fillRect(i * 110 + 20, 0, 26, H);
-      g.save();
+      for (let i = 0; i < 6; i++) g.fillRect(i * 110 + 20 + cam, 0, 26, H);
+      // 動かない基準（逃げ棒）— カメラのドリフトだけを受ける
+      g.fillStyle = '#2a2a2a';
+      g.fillRect(refX0 + cam - refHw, 0, refHw * 2, H);
+      // 杭 — カメラのドリフト＋実際の移動
+      const ym = H / 2, c0 = xc + cam + mv;
       g.beginPath();
-      const ym = H / 2;
-      g.moveTo(xc + slope * (0 - ym) - hw, 0);
-      g.lineTo(xc + slope * (H - ym) - hw, H);
-      g.lineTo(xc + slope * (H - ym) + hw, H);
-      g.lineTo(xc + slope * (0 - ym) + hw, 0);
+      g.moveTo(c0 + slope * (0 - ym) - hw, 0);
+      g.lineTo(c0 + slope * (H - ym) - hw, H);
+      g.lineTo(c0 + slope * (H - ym) + hw, H);
+      g.lineTo(c0 + slope * (0 - ym) + hw, 0);
       g.closePath();
-      g.fillStyle = '#3a3a3a'; g.fill();                          // 暗い杭
-      g.restore();
+      g.fillStyle = '#3a3a3a'; g.fill();
       frame++;
     };
     rec.start();
@@ -103,7 +110,7 @@ const WOBBLE   = 0.30;   // 首振り振幅
     const buf = new Uint8Array(await blob.arrayBuffer());
     let bin = ''; for (let i = 0; i < buf.length; i++) bin += String.fromCharCode(buf[i]);
     return { b64: btoa(bin), bytes: blob.size, frames: total };
-  }, { TRUE_DEG, WOBBLE });
+  }, { TRUE_DEG, WOBBLE, CAM_DRIFT_PX, PILE_MOVE_PX });
   console.log('合成動画: ' + gen.frames + 'フレーム / ' + (gen.bytes / 1024).toFixed(0) + ' KB (VP8圧縮)');
 
   // 実際の操作と同じく「動画」ボタン → ファイル選択 の経路を通す
@@ -115,6 +122,20 @@ const WOBBLE   = 0.30;   // 首振り振幅
   await p.waitForSelector('#vfile.on', { timeout: 10000 });
   await p.waitForFunction(() => typeof VF !== 'undefined' && VF.seed, null, { timeout: 10000 });
   console.log('先頭フレーム取得:', await p.evaluate(() => VF.seed.width + 'x' + VF.seed.height));
+
+  // --- ① 動かない基準（逃げ棒に相当）を2点で指定する ---
+  const tap = async q => {
+    const d = await p.evaluate(pt => { const r = toDisp(pt); return { x: r.x, y: r.y }; }, q);
+    const st = await p.locator('#mark-stage').boundingBox();
+    await p.mouse.move(st.x + d.x, st.y + d.y);
+    await p.mouse.down(); await p.mouse.move(st.x + d.x, st.y + d.y); await p.mouse.up();
+  };
+  await p.click('#vf-vert');
+  await p.waitForSelector('#mark.on');
+  await tap({ x: 120 - 11, y: 480 * 0.2 });
+  await tap({ x: 120 - 11, y: 480 * 0.8 });
+  await p.click('#mark-ok');
+  console.log('鉛直基準:', (await p.textContent('#vf-msg')).replace(/\s+/g, ' ').trim());
 
   // --- ② 杭のエッジを実際にタップして指定する ---
   await p.click('#vf-edges');
@@ -135,21 +156,14 @@ const WOBBLE   = 0.30;   // 首振り振幅
   console.log('ガイド位置:', await p.evaluate(() => 'L=' + Guides.L.toFixed(1) + ' R=' + Guides.R.toFixed(1)));
   console.log('状態:', (await p.textContent('#vf-msg')).replace(/\s+/g, ' ').trim());
 
-  // --- ③ 設計芯を指定（杭の中心 x=320 に対して 20px 左 → +100mm のはず）---
-  const ECC_PX = 20, EXPECT_MM = ECC_PX * (340 / (2 * hw));
-  await p.click('#vf-design');
-  await p.waitForSelector('#mark.on');
-  {
-    const q = { x: xc - ECC_PX, y: H / 2 };     // 傾きの回転中心の高さ = 中心が xc ちょうど
-    const d = await p.evaluate(pt => { const r = toDisp(pt); return { x: r.x, y: r.y }; }, q);
-    const st = await p.locator('#mark-stage').boundingBox();
-    await p.mouse.move(st.x + d.x, st.y + d.y);
-    await p.mouse.down(); await p.mouse.move(st.x + d.x, st.y + d.y); await p.mouse.up();
-    await p.click('#mark-ok');
-  }
-  console.log('設計芯の指定後:', (await p.textContent('#vf-msg')).replace(/\s+/g, ' ').trim());
+  // 設計芯は指定しない → 基準からの移動量で監視するモードになる
+  const MMPX = 340 / (2 * hw);
+  const EXPECT_MOVE_MM = PILE_MOVE_PX * MMPX;   // 杭の実際の移動
+  const DRIFT_MM = CAM_DRIFT_PX * MMPX;         // 三脚のドリフト（打ち消されるべき量）
+  console.log('\n杭の移動 ' + EXPECT_MOVE_MM.toFixed(0) + 'mm / 三脚のドリフト ' +
+              DRIFT_MM.toFixed(0) + 'mm 相当を仕込んである');
 
-  // --- ④ 解析。等速と早送りの両方を通し、フレーム落ちが結果を歪めないか見る ---
+  // --- ③ 解析。等速と早送りの両方を通し、フレーム落ちが結果を歪めないか見る ---
   const analyse = async rate => {
     await p.evaluate(r => { VF.rate = r; document.querySelector('#vf-rate').textContent = r + '倍'; }, rate);
     await p.click('#vf-run');
@@ -158,7 +172,7 @@ const WOBBLE   = 0.30;   // 首振り振幅
       angle: VF.result.angle, sd: VF.result.sd, sem: VF.result.sem,
       n: VF.result.n, rej: VF.result.rejected, edgeDiff: VF.result.edgeDiff,
       widthPx: VF.result.widthPx, mmPerPx: VF.result.mmPerPx,
-      eccMm: VF.result.eccMm, eccSd: VF.result.eccSd,
+      eccMm: VF.result.eccMm, mon: VF.result.mon || null, camRoll: VF.result.camRoll,
     }));
     console.log('\n' + rate + '倍速で解析:');
     console.log('  採用 ' + out.n + ' フレーム / 追跡失敗 ' + out.rej);
@@ -166,10 +180,10 @@ const WOBBLE   = 0.30;   // 首振り振幅
     console.log('  1σ ' + out.sd.toFixed(3) + '°（首振り振幅 ±' + WOBBLE + '° を反映）');
     console.log('  平均の標準誤差 ±' + out.sem.toFixed(4) + '°');
     console.log('  左右エッジ差 ' + out.edgeDiff.toFixed(4) + '°');
-    if (out.eccMm !== undefined)
-      console.log('  偏芯 ' + out.eccMm.toFixed(1) + 'mm （真値 ' + EXPECT_MM.toFixed(1) +
-                  'mm、見かけの幅 ' + out.widthPx.toFixed(1) + 'px = ' + out.mmPerPx.toFixed(3) +
-                  ' mm/px、ばらつき ±' + out.eccSd.toFixed(1) + 'mm）');
+    if (out.mon)
+      console.log('  偏芯（基準からの移動）' + out.mon.end.toFixed(1) + 'mm （真値 ' +
+                  EXPECT_MOVE_MM.toFixed(1) + 'mm、振れ幅 ' + out.mon.range.toFixed(1) +
+                  'mm、見かけの幅 ' + out.widthPx.toFixed(1) + 'px = ' + out.mmPerPx.toFixed(3) + ' mm/px）');
     return out;
   };
   const r = await analyse(1);
@@ -193,10 +207,13 @@ const WOBBLE   = 0.30;   // 首振り振幅
   check('平均が真値と統計的に整合 (|誤差| < 3×標準誤差)', Math.abs(r.angle - TRUE_DEG) < 3 * r.sem);
   check('首振りがばらつきとして現れる (1σ > 0.1°)', r.sd > 0.1);
   check('左右エッジが平行 (<0.1°)', r.edgeDiff < 0.1);
-  check('偏芯が測れている', r.eccMm !== undefined);
-  check('偏芯の誤差 < 5mm', r.eccMm !== undefined && Math.abs(r.eccMm - EXPECT_MM) < 5);
+  check('基準からの相対で偏芯が測れている', r.mon !== null);
+  check('杭の移動を復元 (' + EXPECT_MOVE_MM.toFixed(0) + 'mm ±8mm)',
+        r.mon && Math.abs(r.mon.end - EXPECT_MOVE_MM) < 8);
+  check('三脚のドリフト ' + DRIFT_MM.toFixed(0) + 'mm が打ち消されている',
+        r.mon && Math.abs(r.mon.end - EXPECT_MOVE_MM) < DRIFT_MM * 0.15);
   check('スケールが杭径から正しく出る (±2%)',
-        r.mmPerPx !== undefined && Math.abs(r.mmPerPx - 340 / (2 * hw)) / (340 / (2 * hw)) < 0.02);
+        r.mmPerPx !== undefined && Math.abs(r.mmPerPx - MMPX) / MMPX < 0.02);
   check('JSエラーなし', errs.length === 0);
   if (errs.length) console.log(errs.join('\n'));
 
