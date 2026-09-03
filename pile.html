@@ -182,6 +182,7 @@
 <nav class="tabs">
   <button data-tab="piles" class="on">杭リスト</button>
   <button data-tab="measure">計測</button>
+  <button data-tab="plan">配置図</button>
   <button data-tab="records">記録</button>
   <button data-tab="setup">設定</button>
 </nav>
@@ -283,6 +284,24 @@
 
     <div id="m-step-body" style="margin-top:14px"></div>
   </div>
+</section>
+
+<!-- ============ 配置図 ============ -->
+<section id="tab-plan">
+  <div class="card">
+    <div class="row">
+      <label class="f"><span>偏芯の表示倍率</span>
+        <select id="pl-mag"><option>10</option><option selected>20</option><option>50</option><option>100</option></select></label>
+      <label class="f"><span>杭番号</span>
+        <select id="pl-lab"><option value="1" selected>表示</option><option value="0">非表示</option></select></label>
+    </div>
+    <label class="f"><span>工事名（図の表題）</span><input id="pl-title" placeholder="(仮称)◯◯計画 新築工事 杭工事"></label>
+    <button class="btn" id="pl-svg">図をSVGで書き出す</button>
+  </div>
+  <div class="card" style="padding:8px">
+    <div id="pl-view" style="width:100%;overflow:auto"></div>
+  </div>
+  <div class="card"><div id="pl-sum"></div></div>
 </section>
 
 <!-- ============ 記録 ============ -->
@@ -804,6 +823,7 @@ $$('nav.tabs button').forEach(b => b.addEventListener('click', () => {
   $$('main section').forEach(s => s.classList.remove('on'));
   $('#tab-' + b.dataset.tab).classList.add('on');
   if (b.dataset.tab === 'records') renderRecords();
+  if (b.dataset.tab === 'plan') renderPlan();
   if (b.dataset.tab === 'measure') renderMeasure();
   window.scrollTo(0, 0);
 }));
@@ -2507,6 +2527,158 @@ function finishVideo() {
       sd: Math.sqrt(vals.reduce((a, b) => a + (b - mean) ** 2, 0) / vals.length) }, 'mm');
   }
 }
+
+/* =========================================================
+   配置図（出来形図）
+
+   数値の一覧だけでは「どこがどれだけずれたか」が伝わらない。
+   基礎伏図と同じ配置で、設計位置から実測位置へ矢印を引き、
+   判定で色を分ける。倍率をかけないと 100mm は図面上で見えないので
+   既定で20倍に誇張し、その旨を図中に明記する。
+   SVG で出すので CAD にもブラウザにも印刷にも回せる。
+   ========================================================= */
+
+function planData() {
+  const rows = DB.piles.filter(p => p.x !== null && p.x !== undefined &&
+                                    p.y !== null && p.y !== undefined);
+  return rows.map(p => {
+    const s = pileSummary(p.id);
+    const t = s.byStep.final && s.byStep.final.tilt;
+    return { p, sum: s, tilt: t,
+             ecc: s.head || null,
+             ng: s.head ? s.head.mag > s.allow : null,
+             tiltNg: t ? t.mag > 1 / DB.settings.tiltN : null };
+  });
+}
+
+function buildPlanSVG() {
+  const D = planData();
+  if (!D.length) return null;
+  const mag = parseFloat($('#pl-mag').value) || 20;
+  const showLab = $('#pl-lab').value === '1';
+  const title = $('#pl-title').value.trim() || '杭 出来形図';
+
+  const xs = D.map(d => d.p.x), ys = D.map(d => d.p.y);
+  const x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys);
+  const W = 1600, pad = 110, head = 96;
+  const spanX = Math.max(x1 - x0, 1000), spanY = Math.max(y1 - y0, 1000);
+  const sc = (W - pad * 2) / spanX;
+  const H = Math.round(spanY * sc + pad * 2 + head);
+  const px = x => pad + (x - x0) * sc;
+  const py = y => head + pad + (y1 - y) * sc;        // 図面のYは上向き
+
+  const ok = D.filter(d => d.ng === false).length;
+  const ng = D.filter(d => d.ng === true).length;
+  const un = D.filter(d => d.ng === null).length;
+  const ax = axisNames();
+  const E = [];
+  const esc2 = t => String(t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  /* 文字は白フチを付ける。線や円と重なっても読めるようにするため */
+  const txt = (x, y, t, size, fill, weight) =>
+    '<text x="' + fmt(x, 1) + '" y="' + fmt(y, 1) + '" font-size="' + size + '" fill="' + fill +
+    '" text-anchor="middle"' + (weight ? ' font-weight="' + weight + '"' : '') +
+    ' stroke="#fff" stroke-width="3" paint-order="stroke">' + t + '</text>';
+
+  E.push('<rect width="' + W + '" height="' + H + '" fill="#ffffff"/>');
+  E.push('<text x="' + pad + '" y="38" font-size="26" font-weight="bold" fill="#111">' + esc2(title) + '</text>');
+  E.push('<text x="' + pad + '" y="66" font-size="15" fill="#444">杭 ' + D.length + '本　' +
+    '<tspan fill="#1a7f37">合格 ' + ok + '</tspan>　<tspan fill="#b42318">要協議 ' + ng + '</tspan>　' +
+    '<tspan fill="#888">未計測 ' + un + '</tspan>　' +
+    '偏芯の許容 ' + fmt(eccAllow(D[0].p.dia), 0) + 'mm　傾斜の管理値 1/' + DB.settings.tiltN + '</text>');
+  E.push('<text x="' + pad + '" y="88" font-size="13" fill="#888">偏芯は<tspan font-weight="bold">' + mag +
+    '倍</tspan>に誇張して描いています　軸: ' + esc2(ax[0]) + ' → 図のX、' + esc2(ax[1]) + ' → 図のY　' +
+    new Date().toLocaleDateString('ja-JP') + '</text>');
+
+  // 方眼（1mごと）
+  const grid = 1000;
+  for (let g = Math.ceil(x0 / grid) * grid; g <= x1; g += grid)
+    E.push('<line x1="' + fmt(px(g), 1) + '" y1="' + (head + pad - 20) + '" x2="' + fmt(px(g), 1) +
+      '" y2="' + fmt(py(y0) + 20, 1) + '" stroke="#eee" stroke-width="1"/>');
+  for (let g = Math.ceil(y0 / grid) * grid; g <= y1; g += grid)
+    E.push('<line x1="' + (pad - 20) + '" y1="' + fmt(py(g), 1) + '" x2="' + fmt(px(x1) + 20, 1) +
+      '" y2="' + fmt(py(g), 1) + '" stroke="#eee" stroke-width="1"/>');
+
+  D.forEach(d => {
+    const r = Math.max(7, (d.p.dia || 400) / 2 * sc);
+    const cx = px(d.p.x), cy = py(d.p.y);
+    const col = d.ng === null ? '#9aa0a6' : (d.ng ? '#b42318' : '#1a7f37');
+    // 設計位置（点線の円）
+    E.push('<circle cx="' + fmt(cx, 1) + '" cy="' + fmt(cy, 1) + '" r="' + fmt(r, 1) +
+      '" fill="none" stroke="#bbb" stroke-width="1.2" stroke-dasharray="3,3"/>');
+    E.push('<line x1="' + fmt(cx - r, 1) + '" y1="' + fmt(cy, 1) + '" x2="' + fmt(cx + r, 1) +
+      '" y2="' + fmt(cy, 1) + '" stroke="#ddd" stroke-width="1"/>');
+    E.push('<line x1="' + fmt(cx, 1) + '" y1="' + fmt(cy - r, 1) + '" x2="' + fmt(cx, 1) +
+      '" y2="' + fmt(cy + r, 1) + '" stroke="#ddd" stroke-width="1"/>');
+
+    if (d.ecc) {
+      // 実測位置（誇張して描く）と、そこへの矢印
+      const dx = d.ecc.hA * mag * sc, dy = -d.ecc.hB * mag * sc;
+      const ex = cx + dx, ey = cy + dy;
+      E.push('<circle cx="' + fmt(ex, 1) + '" cy="' + fmt(ey, 1) + '" r="' + fmt(r, 1) +
+        '" fill="' + col + '" fill-opacity="0.14" stroke="' + col + '" stroke-width="2"/>');
+      if (Math.hypot(dx, dy) > 2)
+        E.push('<line x1="' + fmt(cx, 1) + '" y1="' + fmt(cy, 1) + '" x2="' + fmt(ex, 1) + '" y2="' +
+          fmt(ey, 1) + '" stroke="' + col + '" stroke-width="2" marker-end="url(#ah)"/>');
+      // 文字はまとめて矢印の反対側に積む（実測位置の円と重ならないように）
+      const sd = dy > 0 ? -1 : 1;                  // 空いている方向
+      const at = k => cy + sd * (r + k) + (sd < 0 ? 0 : 4);
+      if (showLab) E.push(txt(cx, at(11), esc2(d.p.no), 12, '#333'));
+      E.push(txt(cx, at(showLab ? 25 : 11), fmt(d.ecc.mag, 0), 12, col, 'bold'));
+      if (d.tilt) E.push(txt(cx, at(showLab ? 37 : 23), '1/' + fmt(d.tilt.ratio, 0), 10,
+                             d.tiltNg ? '#b42318' : '#888'));
+    } else {
+      // 未計測は灰色で「まだ測っていない」と分かるようにする
+      if (showLab) E.push(txt(cx, cy - r - 8, esc2(d.p.no), 12, col));
+      E.push(txt(cx, cy + r + 16, '未計測', 10, col));
+    }
+  });
+
+  // 凡例とスケールバー
+  const ly = H - 46;
+  E.push('<text x="' + pad + '" y="' + ly + '" font-size="12" fill="#666">' +
+    '○点線=設計位置　●=実測位置（' + mag + '倍に誇張）　' +
+    '<tspan fill="#1a7f37">緑=合格</tspan>　<tspan fill="#b42318">赤=要協議</tspan>　' +
+    '<tspan fill="#9aa0a6">灰=未計測</tspan>　数字=偏芯mm / 傾斜</text>');
+  const barMm = 5000, bx = W - pad - barMm * sc;
+  E.push('<line x1="' + fmt(bx, 1) + '" y1="' + (ly - 6) + '" x2="' + fmt(bx + barMm * sc, 1) +
+    '" y2="' + (ly - 6) + '" stroke="#333" stroke-width="2"/>');
+  E.push('<text x="' + fmt(bx + barMm * sc / 2, 1) + '" y="' + (ly + 12) +
+    '" font-size="11" fill="#333" text-anchor="middle">5m</text>');
+
+  return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ' + W + ' ' + H + '" width="' + W +
+    '" height="' + H + '" font-family="sans-serif">' +
+    '<defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">' +
+    '<path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/></marker></defs>' + E.join('') + '</svg>';
+}
+
+function renderPlan() {
+  const D = planData();
+  const box = $('#pl-view'), sum = $('#pl-sum');
+  if (!D.length) {
+    box.innerHTML = '';
+    sum.innerHTML = '<div class="hint">設計座標のある杭がありません。IFCかDXFから取り込むか、杭リストで座標を入れてください。</div>';
+    return;
+  }
+  box.innerHTML = buildPlanSVG();
+  const svg = box.querySelector('svg');
+  if (svg) { svg.removeAttribute('width'); svg.removeAttribute('height'); svg.style.width = '100%'; svg.style.height = 'auto'; }
+  const ng = D.filter(d => d.ng === true);
+  sum.innerHTML = '<table class="kv"><tbody>' +
+    '<tr><td>設計座標のある杭</td><td>' + D.length + ' / ' + DB.piles.length + '</td></tr>' +
+    '<tr><td>計測済み</td><td>' + D.filter(d => d.ng !== null).length + '</td></tr>' +
+    '<tr><td>偏芯 要協議</td><td>' + (ng.length
+      ? '<span class="badge b-ng">' + ng.length + '</span> ' + ng.map(d => esc(d.p.no)).join(', ')
+      : '<span class="badge b-ok">0</span>') + '</td></tr>' +
+    '</tbody></table>';
+}
+
+['#pl-mag', '#pl-lab'].forEach(id => $(id).addEventListener('change', renderPlan));
+$('#pl-title').addEventListener('input', () => { DB.settings.title = $('#pl-title').value; saveDB(); });
+$('#pl-svg').addEventListener('click', () => {
+  const svg = buildPlanSVG();
+  if (!svg) { toast('設計座標のある杭がありません'); return; }
+  download('杭出来形図_' + new Date().toISOString().slice(0, 10) + '.svg', svg, 'image/svg+xml');
+});
 
 /* =========================================================
    記録
