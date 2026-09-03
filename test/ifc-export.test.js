@@ -100,7 +100,7 @@ print(json.dumps(res, ensure_ascii=False))
   console.log('  スキーマ ' + r.schema + '　階層 ' + r.storeys.join('/') + '　単位 ' +
               r.units.map(u => u[0] + (u[1] ? '(' + u[1] + ')' : '')).join(' '));
   r.piles.forEach(d => {
-    const ab = d.psets['Pset_SEKOBASE_PileAsBuilt'] || {};
+    const ab = d.psets['Pset_杭出来形'] || {};
     console.log('  ' + d.name + ': ' + d.profile[0] + ' R=' + d.profile[1] + ' t=' + d.profile[2] +
       '　X[' + d.bbox[0].toFixed(2) + ',' + d.bbox[1].toFixed(2) + '] Z[' + d.bbox[2].toFixed(2) +
       ',' + d.bbox[3].toFixed(2) + ']　三角形' + d.tris);
@@ -126,8 +126,10 @@ print(json.dumps(res, ensure_ascii=False))
   ck('工法が ObjectType に入る', a.obj === 'N-ECS');
   ck('Pset_PileCommon.Reference が杭番号', a.psets['Pset_PileCommon'].Reference === 'No.10');
   ck('日本語のプロパティ名が往復する',
-     a.psets['Pset_SEKOBASE_PileSpec']['鋼種'] === 'STK490');
-  const A = a.psets['Pset_SEKOBASE_PileAsBuilt'], B = b2.psets['Pset_SEKOBASE_PileAsBuilt'];
+     a.psets['Pset_杭設計値']['材質'] === 'STK490');
+  ck('既存の杭IFCと同じPset名で出る',
+     !!a.psets['Pset_杭設計値'] && !!a.psets['Pset_杭出来形']);
+  const A = a.psets['Pset_杭出来形'], B = b2.psets['Pset_杭出来形'];
   ck('杭芯セットの読みが残る', A['杭芯セット_読み1_mm'] === 1500);
   ck('偏芯が合格判定 (No.10)', A['偏芯_判定'] === '合格');
   ck('許容超過が要協議になる (No.12)', B['偏芯_判定'] === '要協議' && B['杭頭偏芯_合成_mm'] > 100);
