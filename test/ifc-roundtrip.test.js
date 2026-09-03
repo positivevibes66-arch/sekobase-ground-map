@@ -73,6 +73,13 @@ srv.listen(0, '127.0.0.1', async () => {
       sensor(fi, tx, ty); fi.ecc = { mode: 'rods', r1: f1, r2: f2, measH: 0.5, at: Date.now() };
       commitMeas(fi);
     });
+    // No.1 だけ、後日 根切り後に杭頭を出して実測した想定（本来の出来形）
+    {
+      const pl = DB.piles.find(q => q.no === 'No.1');
+      const dg = ensureMeas(pl.id, 'dug');
+      dg.ecc = { mode: 'offset', eA: 41, eB: -22, measH: 0, by: '光波 / 元請', at: Date.now() };
+      commitMeas(dg);
+    }
     const r = mergeIFC();
     // 二度実行しても増殖しないこと
     const again = mergeIFC();
@@ -106,9 +113,14 @@ out = {
  'withNew': sorted(p.Name for p in pb.values() if 'Pset_杭出来形' in ue.get_psets(p)),
  'sample': None, 'schema': b.schema,
 }
+out['withRec'] = sorted(p.Name for p in pb.values() if 'Pset_杭施工記録' in ue.get_psets(p))
 for p in pb.values():
-    d = ue.get_psets(p).get('Pset_杭出来形')
-    if d and p.Name == 'No.1': out['sample'] = d
+    ps = ue.get_psets(p)
+    if p.Name == 'No.1':
+        out['sample'] = ps.get('Pset_杭施工記録')
+        out['dug'] = ps.get('Pset_杭出来形')
+    if p.Name == 'No.3':
+        out['dug3'] = ps.get('Pset_杭出来形')
 print(json.dumps(out, ensure_ascii=False))
 `;
   let r = null;
@@ -122,9 +134,12 @@ print(json.dumps(out, ensure_ascii=False))
   console.log('\nifcopenshell で読み直した結果:');
   console.log('  ' + r.na + '本 → ' + r.nb + '本　GUID一致 ' + r.same_guids +
     '　設計値Pset無傷 ' + r.spec_same + '/' + r.na + '　形状同一 ' + r.geom_same + '/' + r.na);
-  console.log('  出来形が付いた杭: ' + r.withNew.join(', '));
-  console.log('  No.1: 偏芯 ' + Number(s['杭頭偏芯_合成_mm']).toFixed(1) + 'mm / 許容 ' +
-    s['偏芯_許容_mm'] + ' → ' + s['偏芯_判定'] + '　傾斜 ' + s['傾斜_合成'] + ' → ' + s['傾斜_判定']);
+  console.log('  施工記録が付いた杭: ' + r.withRec.join(', ') + '　出来形(根切り後): ' + r.withNew.join(', '));
+  console.log('  No.1 推定 ' + Number(s['推定_杭頭偏芯_合成_mm']).toFixed(1) + 'mm → ' + s['推定での判定'] +
+    '　傾斜 ' + s['傾斜_合成'] + ' → ' + s['傾斜_判定']);
+  console.log('  No.1 根切り後の実測 ' + Number(r.dug['実測_杭頭偏芯_合成_mm']).toFixed(1) + 'mm → ' +
+    r.dug['判定'] + '　推定との差 ' + Number(r.dug['地上からの推定との差_mm']).toFixed(1) + 'mm（' +
+    r.dug['計測者_方法'] + '）');
 
   console.log('');
   const stripped = merged.text.replace(/\/\* SEKOBASE-BEGIN \*\/[\s\S]*?\/\* SEKOBASE-END \*\/\n?/g, '');
@@ -138,8 +153,15 @@ print(json.dumps(out, ensure_ascii=False))
   ck('GUIDが1つも変わらない', r.same_guids === true);
   ck('元の設計値Psetが無傷', r.spec_same === 6);
   ck('形状の定義が一切変わらない', r.geom_same === 6);
-  ck('計測した杭だけに出来形が付く', r.withNew.length === 2 && r.withNew.join() === 'No.1,No.3');
-  ck('出来形の値が入っている', Math.abs(s['杭頭偏芯_合成_mm'] - 36.1) < 1 && s['偏芯_判定'] === '合格');
+  ck('計測した杭だけに施工記録が付く', r.withRec.length === 2 && r.withRec.join() === 'No.1,No.3');
+  ck('地上の計測は「推定」として入る', Math.abs(s['推定_杭頭偏芯_合成_mm'] - 36.1) < 1 && s['推定での判定'] === '合格');
+  ck('根切り後の実測がある杭だけに出来形が付く', r.withNew.join() === 'No.1' && !r.dug3);
+  ck('出来形は実測値そのもの', Math.abs(r.dug['実測_杭頭偏芯_合成_mm'] - Math.hypot(41, 22)) < 0.5);
+  // 差は「実測 − 推定」。推定の成分は同じ施工記録のPsetに入っているので、そこから検算する
+  const wantDiff = Math.hypot(41 - s['推定_杭頭偏芯_X通り_mm'], -22 - s['推定_杭頭偏芯_Y通り_mm']);
+  ck('推定との差が実測−推定と一致 (' + wantDiff.toFixed(1) + 'mm)',
+     Math.abs(r.dug['地上からの推定との差_mm'] - wantDiff) < 0.2);
+  ck('出来形は根切り後だと明記される', r.dug['計測時期'].indexOf('根切り後') === 0);
   ck('管理値1/200で傾斜が判定される', s['傾斜_管理値'] === '1/200');
   ck('二度書き戻しても増殖しない', merged.twiceSame === true);
   ck('IFC4のまま', r.schema === 'IFC4');

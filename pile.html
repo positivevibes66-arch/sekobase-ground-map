@@ -295,7 +295,7 @@
       <label class="f"><span>杭番号</span>
         <select id="pl-lab"><option value="1" selected>表示</option><option value="0">非表示</option></select></label>
     </div>
-    <label class="f"><span>工事名（図の表題）</span><input id="pl-title" placeholder="(仮称)◯◯計画 新築工事 杭工事"></label>
+    <label class="f"><span>工事名（図の表題）</span><input id="pl-title" placeholder="(仮称)◯◯計画 新築工事　杭 施工記録図"></label>
     <button class="btn" id="pl-svg">図をSVGで書き出す</button>
   </div>
   <div class="card" style="padding:8px">
@@ -494,7 +494,8 @@ const STEPS = [
   { key:'mid',      name:'圧入中',   desc:'トレンド監視（任意）' },
   { key:'preweld',  name:'溶接前',   desc:'下杭の最終傾斜' },
   { key:'postweld', name:'溶接後',   desc:'継手の折れ角を算出' },
-  { key:'final',    name:'最終',     desc:'消える直前＋偏芯実測' },
+  { key:'final',    name:'最終',     desc:'地中に消える直前（ここまでが杭屋の視界）' },
+  { key:'dug',      name:'根切り後', desc:'杭頭を出して実測＝本来の出来形' },
 ];
 const stepName = k => (STEPS.find(s => s.key === k) || {}).name || k;
 
@@ -807,11 +808,22 @@ function pileSummary(pileId) {
     absEcc = eccOffsets(pileId, fin.meas);
     if (absEcc) {
       const dh = (fin.meas.ecc.measH || 0) + (p.headDepth || 0);
-      head = extrapolate(absEcc, fin.tilt, dh);
+      head = extrapolate(absEcc, fin.tilt, dh);        // ← 地上の計測からの「推定」
       head.mag = eccMag(head.hA, head.hB);
     }
   }
-  return { pile: p, byStep, joint, head, absEcc, allow: eccAllow(p.dia) };
+  /* 根切り後に杭頭を出して測った値が本来の出来形。
+     杭屋が地上で見られるのは埋まる前までなので、
+     最終計測から設計杭頭レベルへ外挿した値は「推定」でしかない。
+     両方そろったら差を出す。これが貯まれば外挿の確からしさが分かる。 */
+  const dugM = byStep.dug && byStep.dug.meas.ecc;
+  let dug = null, diff = null;
+  if (dugM && dugM.eA !== undefined && dugM.eA !== null) {
+    dug = { eA: dugM.eA, eB: dugM.eB, mag: eccMag(dugM.eA, dugM.eB), at: dugM.at, by: dugM.by || '' };
+    if (head) diff = { dA: dug.eA - head.hA, dB: dug.eB - head.hB,
+                       mag: eccMag(dug.eA - head.hA, dug.eB - head.hB) };
+  }
+  return { pile: p, byStep, joint, head, absEcc, dug, diff, allow: eccAllow(p.dia) };
 }
 
 /* =========================================================
@@ -1017,7 +1029,8 @@ function renderStepBody(p) {
   box.appendChild(buildSensorCard(p, m));
 
   // --- 杭芯セット / 最終ステップ: 偏芯 ---
-  if (curStep === 'setout' || curStep === 'final') box.appendChild(buildEccCard(p, m, t));
+  if (curStep === 'setout' || curStep === 'final' || curStep === 'dug')
+    box.appendChild(buildEccCard(p, m, t));
 }
 function viewMode(v) {
   if (!v) return '-';
@@ -1098,10 +1111,72 @@ function buildSensorCard(p, m) {
   return c;
 }
 
+/* 根切り後の実測＝本来の出来形。
+   杭工事の時点では取れない値なので、後から（多くは別の人が）入れる。
+   地上の計測からの推定と突き合わせて、外挿がどれだけ当たったかを残す。 */
+function buildDugCard(p, c) {
+  const m = ensureMeas(p.id, 'dug');
+  const sum = pileSummary(p.id);
+  const ax = axisNames();
+  const e = m.ecc || {};
+  const v = k => (e[k] === undefined || e[k] === null) ? '' : e[k];
+  c.innerHTML =
+    '<h2 style="margin-top:0">根切り後の実測（出来形）</h2>' +
+    '<div class="hint" style="margin-bottom:12px">杭頭を出して測った<b>実際の偏芯</b>を入れてください。' +
+    'これが本来の出来形です。杭工事の時点では取れないので、根切り後に分かった値を後から記録します。' +
+    (sum.head ? '<br>地上の計測からの推定は <b>' + fmt(sum.head.mag, 0) + 'mm</b>（' +
+      fmt(sum.head.hA, 0) + ' / ' + fmt(sum.head.hB, 0) + '）です。' : '') + '</div>' +
+    '<div class="row">' +
+      '<label class="f"><span>' + esc(ax[0]) + ' のズレ (mm)</span>' +
+        '<input id="dg-a" type="number" inputmode="decimal" value="' + v('eA') + '"></label>' +
+      '<label class="f"><span>' + esc(ax[1]) + ' のズレ (mm)</span>' +
+        '<input id="dg-b" type="number" inputmode="decimal" value="' + v('eB') + '"></label>' +
+    '</div>' +
+    '<label class="f"><span>計測者・計測方法（任意）</span>' +
+      '<input id="dg-by" value="' + esc(e.by || '') + '" placeholder="例) 光波 / 元請"></label>' +
+    '<button class="btn" id="dg-save">保存して判定</button>' +
+    '<div id="dg-out" style="margin-top:14px"></div>';
+
+  setTimeout(() => {
+    const out = $('#dg-out');
+    const render = () => {
+      const s2 = pileSummary(p.id);
+      if (!s2.dug) { out.innerHTML = '<div class="hint">入力すると、推定との差を出して判定します。</div>'; return; }
+      const ng = s2.dug.mag > s2.allow;
+      const col = ng ? 'var(--ng)' : (s2.dug.mag > s2.allow * 0.7 ? 'var(--warn)' : 'var(--ok)');
+      out.innerHTML =
+        '<div class="result-big"><div class="num" style="color:' + col + '">' + fmt(s2.dug.mag, 0) +
+          '<span style="font-size:18px"> mm</span></div>' +
+        '<div class="sub">根切り後の実測（出来形）　許容 ' + fmt(s2.allow, 0) + 'mm</div></div>' +
+        '<table class="kv"><tbody>' +
+        '<tr><td>実測 ' + esc(ax[0]) + ' / ' + esc(ax[1]) + '</td><td>' +
+          fmt(s2.dug.eA, 0) + ' / ' + fmt(s2.dug.eB, 0) + ' mm</td></tr>' +
+        (s2.head ? '<tr><td>地上からの推定</td><td>' + fmt(s2.head.mag, 0) + ' mm（' +
+          fmt(s2.head.hA, 0) + ' / ' + fmt(s2.head.hB, 0) + '）</td></tr>' +
+          '<tr><td>推定との差</td><td><b>' + fmt(s2.diff.mag, 0) + ' mm</b>（' +
+          fmt(s2.diff.dA, 0) + ' / ' + fmt(s2.diff.dB, 0) + '）</td></tr>' : '') +
+        '<tr><td>判定</td><td><span class="badge ' + (ng ? 'b-ng' : 'b-ok') + '">' +
+          (ng ? '要協議' : '合格') + '</span></td></tr>' +
+        '</tbody></table>' +
+        (s2.head ? '<div class="hint" style="margin-top:12px">推定と実測の差は、外挿の誤差と、' +
+          '<b>地中で杭が偏向した分</b>の合計です。これが貯まると、地上の計測でどこまで言えるかが分かります。</div>' : '');
+    };
+    $('#dg-save').addEventListener('click', () => {
+      const eA = parseFloat($('#dg-a').value), eB = parseFloat($('#dg-b').value);
+      if (!isFinite(eA) || !isFinite(eB)) { toast('2方向のズレを入れてください'); return; }
+      m.ecc = { mode: 'offset', eA, eB, measH: 0, by: $('#dg-by').value.trim(), at: Date.now() };
+      commitMeas(m); render(); toast('保存しました');
+    });
+    render();
+  }, 0);
+  return c;
+}
+
 function buildEccCard(p, m, tilt) {
   const c = document.createElement('div'); c.className = 'card';
   const ax = axisNames();
   const isSetout = curStep === 'setout';
+  const isDug = curStep === 'dug';
   const so = getMeas(p.id, 'setout');
   const origin = so && so.ecc && so.ecc.r1 !== undefined ? so.ecc : null;
   const e = m.ecc || {};
@@ -1122,6 +1197,8 @@ function buildEccCard(p, m, tilt) {
       '<label class="f"><span>' + esc(ax[1]) + ' のズレ (mm)</span>' +
         '<input id="e-b" type="number" inputmode="decimal" value="' + v('eB') + '"></label>' +
     '</div>';
+
+  if (isDug) return buildDugCard(p, c);
 
   c.innerHTML =
     '<h2 style="margin-top:0">' + (isSetout ? '杭芯セット — 逃げ棒の実測' : '偏芯の実測') + '</h2>' +
@@ -2931,14 +3008,20 @@ function mergeIFC() {
   DB.piles.forEach(p => {
     const target = p.ifcGuid && guidToId.get(p.ifcGuid);
     if (!target) return;
+    const attach = (name, rows) => {
+      if (!rows.length) return false;
+      const refs = rows.map(([n, ty, v]) =>
+        put('IFCPROPERTYSINGLEVALUE(' + ifcStr(n) + ',$,' + ty + '(' + v + '),$)'));
+      const ps = put('IFCPROPERTYSET(' + ifcStr(ifcGuid()) + ',$,' + ifcStr(name) +
+                     ',$,(' + refs.join(',') + '))');
+      put('IFCRELDEFINESBYPROPERTIES(' + ifcStr(ifcGuid()) + ',$,$,$,(' + target + '),' + ps + ')');
+      return true;
+    };
     const rows = asBuiltRows(p);
-    if (rows.length <= 1) return;          // 基準軸だけ＝未計測なので付けない
-    const refs = rows.map(([n, ty, v]) =>
-      put('IFCPROPERTYSINGLEVALUE(' + ifcStr(n) + ',$,' + ty + '(' + v + '),$)'));
-    const ps = put('IFCPROPERTYSET(' + ifcStr(ifcGuid()) + ',$,' + ifcStr('Pset_杭出来形') +
-                   ',$,(' + refs.join(',') + '))');
-    put('IFCRELDEFINESBYPROPERTIES(' + ifcStr(ifcGuid()) + ',$,$,$,(' + target + '),' + ps + ')');
-    added++;
+    let any = false;
+    if (rows.length > 1) any = attach('Pset_杭施工記録', rows) || any;
+    any = attach('Pset_杭出来形', dugRows(p)) || any;
+    if (any) added++;
   });
   if (!added) { toast('書き戻せる計測結果がありません'); return null; }
 
@@ -3153,7 +3236,9 @@ const ifcR = v => {                       // IFCのREALは必ず小数点を含�
   return s.includes('.') || s.includes('E') ? s : s + '.';
 };
 
-/* 出来形（偏芯・傾斜）のプロパティ。新規書き出しと書き戻しで共用する */
+/* 杭施工記録のプロパティ（杭屋が地上で取れる範囲）。
+   設計杭頭レベルの偏芯は外挿による「推定」なので、そう明記する。
+   本来の出来形は根切り後に杭頭を出して測るもので、別のPsetに入れる。 */
 function asBuiltRows(p) {
   const sum = pileSummary(p.id);
   if (!sum) return [];
@@ -3174,12 +3259,14 @@ function asBuiltRows(p) {
     rows.push(['偏芯_' + ax[1] + '_mm', 'IFCLENGTHMEASURE', ifcR(sum.absEcc.eB)]);
   }
   if (sum.head) {
-    rows.push(['杭頭偏芯_' + ax[0] + '_mm', 'IFCLENGTHMEASURE', ifcR(sum.head.hA)]);
-    rows.push(['杭頭偏芯_' + ax[1] + '_mm', 'IFCLENGTHMEASURE', ifcR(sum.head.hB)]);
-    rows.push(['杭頭偏芯_合成_mm', 'IFCLENGTHMEASURE', ifcR(sum.head.mag)]);
+    rows.push(['推定_杭頭偏芯_' + ax[0] + '_mm', 'IFCLENGTHMEASURE', ifcR(sum.head.hA)]);
+    rows.push(['推定_杭頭偏芯_' + ax[1] + '_mm', 'IFCLENGTHMEASURE', ifcR(sum.head.hB)]);
+    rows.push(['推定_杭頭偏芯_合成_mm', 'IFCLENGTHMEASURE', ifcR(sum.head.mag)]);
     rows.push(['偏芯_許容_mm', 'IFCLENGTHMEASURE', ifcR(sum.allow)]);
-    rows.push(['偏芯_判定', 'IFCLABEL', ifcStr(sum.head.mag > sum.allow ? '要協議' : '合格')]);
-    rows.push(['偏芯_外挿距離_m', 'IFCREAL', ifcR(sum.head.dh_m)]);
+    rows.push(['推定での判定', 'IFCLABEL', ifcStr(sum.head.mag > sum.allow ? '要協議' : '合格')]);
+    rows.push(['推定_外挿距離_m', 'IFCREAL', ifcR(sum.head.dh_m)]);
+    rows.push(['推定の前提', 'IFCLABEL', ifcStr('最終計測位置から杭が直線であるとして外挿。' +
+      '本来の出来形は根切り後の実測による')]);
   }
   if (t) {
     rows.push(['傾斜_' + ax[0], 'IFCREAL', ifcR(t.tA)]);
@@ -3192,6 +3279,25 @@ function asBuiltRows(p) {
     rows.push(['計測日時', 'IFCLABEL', ifcStr(new Date(fin.meas.at).toISOString())]);
   }
   if (sum.joint) rows.push(['継手_折れ角', 'IFCLABEL', ifcStr('1/' + sum.joint.ratio.toFixed(0))]);
+  return rows;
+}
+
+/* 本来の出来形＝根切り後に杭頭を出して測った値。あるときだけ出す。 */
+function dugRows(p) {
+  const sum = pileSummary(p.id);
+  if (!sum || !sum.dug) return [];
+  const ax = axisNames();
+  const rows = [
+    ['実測_杭頭偏芯_' + ax[0] + '_mm', 'IFCLENGTHMEASURE', ifcR(sum.dug.eA)],
+    ['実測_杭頭偏芯_' + ax[1] + '_mm', 'IFCLENGTHMEASURE', ifcR(sum.dug.eB)],
+    ['実測_杭頭偏芯_合成_mm', 'IFCLENGTHMEASURE', ifcR(sum.dug.mag)],
+    ['偏芯_許容_mm', 'IFCLENGTHMEASURE', ifcR(sum.allow)],
+    ['判定', 'IFCLABEL', ifcStr(sum.dug.mag > sum.allow ? '要協議' : '合格')],
+    ['計測時期', 'IFCLABEL', ifcStr('根切り後（杭頭露出）')],
+    ['計測日時', 'IFCLABEL', ifcStr(new Date(sum.dug.at).toISOString())],
+  ];
+  if (sum.dug.by) rows.push(['計測者_方法', 'IFCLABEL', ifcStr(sum.dug.by)]);
+  if (sum.diff) rows.push(['地上からの推定との差_mm', 'IFCLENGTHMEASURE', ifcR(sum.diff.mag)]);
   return rows;
 }
 
@@ -3292,7 +3398,9 @@ function buildIFC() {
     ].filter(x => x[2] !== '$'), pile);
 
     const rows = asBuiltRows(p);
-    if (rows.length > 1) pset('Pset_杭出来形', rows, pile);
+    if (rows.length > 1) pset('Pset_杭施工記録', rows, pile);
+    const dr = dugRows(p);
+    if (dr.length) pset('Pset_杭出来形', dr, pile);
   });
 
   if (piles.length)

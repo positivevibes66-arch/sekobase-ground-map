@@ -100,12 +100,12 @@ print(json.dumps(res, ensure_ascii=False))
   console.log('  スキーマ ' + r.schema + '　階層 ' + r.storeys.join('/') + '　単位 ' +
               r.units.map(u => u[0] + (u[1] ? '(' + u[1] + ')' : '')).join(' '));
   r.piles.forEach(d => {
-    const ab = d.psets['Pset_杭出来形'] || {};
+    const ab = d.psets['Pset_杭施工記録'] || {};
     console.log('  ' + d.name + ': ' + d.profile[0] + ' R=' + d.profile[1] + ' t=' + d.profile[2] +
       '　X[' + d.bbox[0].toFixed(2) + ',' + d.bbox[1].toFixed(2) + '] Z[' + d.bbox[2].toFixed(2) +
       ',' + d.bbox[3].toFixed(2) + ']　三角形' + d.tris);
-    console.log('      偏芯 ' + ab['杭頭偏芯_合成_mm'] + 'mm / 許容 ' + ab['偏芯_許容_mm'] +
-      ' → ' + ab['偏芯_判定'] + '　傾斜 ' + ab['傾斜_合成'] + ' / ' + ab['傾斜_管理値'] +
+    console.log('      推定偏芯 ' + ab['推定_杭頭偏芯_合成_mm'] + 'mm / 許容 ' + ab['偏芯_許容_mm'] +
+      ' → ' + ab['推定での判定'] + '　傾斜 ' + ab['傾斜_合成'] + ' / ' + ab['傾斜_管理値'] +
       ' → ' + ab['傾斜_判定']);
   });
 
@@ -128,11 +128,14 @@ print(json.dumps(res, ensure_ascii=False))
   ck('日本語のプロパティ名が往復する',
      a.psets['Pset_杭設計値']['材質'] === 'STK490');
   ck('既存の杭IFCと同じPset名で出る',
-     !!a.psets['Pset_杭設計値'] && !!a.psets['Pset_杭出来形']);
-  const A = a.psets['Pset_杭出来形'], B = b2.psets['Pset_杭出来形'];
+     !!a.psets['Pset_杭設計値'] && !!a.psets['Pset_杭施工記録']);
+  ck('根切り後の実測が無ければ出来形のPsetは付かない',
+     !a.psets['Pset_杭出来形'] && !b2.psets['Pset_杭出来形']);
+  const A = a.psets['Pset_杭施工記録'], B = b2.psets['Pset_杭施工記録'];
   ck('杭芯セットの読みが残る', A['杭芯セット_読み1_mm'] === 1500);
-  ck('偏芯が合格判定 (No.10)', A['偏芯_判定'] === '合格');
-  ck('許容超過が要協議になる (No.12)', B['偏芯_判定'] === '要協議' && B['杭頭偏芯_合成_mm'] > 100);
+  ck('推定が合格判定 (No.10)', A['推定での判定'] === '合格');
+  ck('許容超過が要協議になる (No.12)', B['推定での判定'] === '要協議' && B['推定_杭頭偏芯_合成_mm'] > 100);
+  ck('推定であることが前提として明記される', String(A['推定の前提']).indexOf('根切り後') > 0);
   ck('傾斜の管理値 1/200 が記録される', A['傾斜_管理値'] === '1/200');
   ck('傾斜も超過側が要協議 (No.12)', B['傾斜_判定'] === '要協議');
   ck('計測方法が残る', A['計測方法'].indexOf('センサー') === 0);
