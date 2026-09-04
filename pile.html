@@ -296,7 +296,15 @@
         <select id="pl-lab"><option value="1" selected>表示</option><option value="0">非表示</option></select></label>
     </div>
     <label class="f"><span>工事名（図の表題）</span><input id="pl-title" placeholder="(仮称)◯◯計画 新築工事　杭 施工記録図"></label>
-    <button class="btn" id="pl-svg">図をSVGで書き出す</button>
+    <div class="row" style="display:flex;gap:10px">
+      <button class="btn" id="pl-svg" style="flex:1">SVG（印刷用）</button>
+      <button class="btn" id="pl-print" style="flex:0 0 96px">印刷/PDF</button>
+    </div>
+    <div style="height:8px"></div>
+    <label class="f"><span>DXFの偏芯表示　※CADは拡大できるので実寸が既定</span>
+      <select id="pl-dxfmag"><option value="1" selected>実寸（1倍）</option>
+        <option value="5">5倍</option><option value="10">10倍</option><option value="20">20倍</option></select></label>
+    <button class="btn primary" id="pl-dxf">CADに出す（DXF・杭伏図に重なります）</button>
   </div>
   <div class="card" style="padding:8px">
     <div id="pl-view" style="width:100%;overflow:auto"></div>
@@ -2621,9 +2629,10 @@ function planData() {
   return rows.map(p => {
     const s = pileSummary(p.id);
     const t = s.byStep.final && s.byStep.final.tilt;
-    return { p, sum: s, tilt: t,
-             ecc: s.head || null,
-             ng: s.head ? s.head.mag > s.allow : null,
+    // 根切り後の実測があればそれが出来形。無ければ地上からの推定。
+    const use = s.dug ? { hA: s.dug.eA, hB: s.dug.eB, mag: s.dug.mag } : s.head;
+    return { p, sum: s, tilt: t, ecc: use || null, measured: !!s.dug,
+             ng: use ? use.mag > s.allow : null,
              tiltNg: t ? t.mag > 1 / DB.settings.tiltN : null };
   });
 }
@@ -2633,7 +2642,7 @@ function buildPlanSVG() {
   if (!D.length) return null;
   const mag = parseFloat($('#pl-mag').value) || 20;
   const showLab = $('#pl-lab').value === '1';
-  const title = $('#pl-title').value.trim() || '杭 出来形図';
+  const title = $('#pl-title').value.trim() || '杭 施工記録図';
 
   const xs = D.map(d => d.p.x), ys = D.map(d => d.p.y);
   const x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys);
@@ -2647,6 +2656,8 @@ function buildPlanSVG() {
   const ok = D.filter(d => d.ng === false).length;
   const ng = D.filter(d => d.ng === true).length;
   const un = D.filter(d => d.ng === null).length;
+  const dugN = D.filter(d => d.measured).length;
+  const estN = D.filter(d => d.ecc && !d.measured).length;
   const ax = axisNames();
   const E = [];
   const esc2 = t => String(t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -2663,7 +2674,8 @@ function buildPlanSVG() {
     '<tspan fill="#888">未計測 ' + un + '</tspan>　' +
     '偏芯の許容 ' + fmt(eccAllow(D[0].p.dia), 0) + 'mm　傾斜の管理値 1/' + DB.settings.tiltN + '</text>');
   E.push('<text x="' + pad + '" y="88" font-size="13" fill="#888">偏芯は<tspan font-weight="bold">' + mag +
-    '倍</tspan>に誇張して描いています　軸: ' + esc2(ax[0]) + ' → 図のX、' + esc2(ax[1]) + ' → 図のY　' +
+    '倍</tspan>に誇張　軸: ' + esc2(ax[0]) + '→図のX、' + esc2(ax[1]) + '→図のY　' +
+    '<tspan font-weight="bold">実測(根切り後) ' + dugN + '本 / 推定(地上計測からの外挿) ' + estN + '本</tspan>　' +
     new Date().toLocaleDateString('ja-JP') + '</text>');
 
   // 方眼（1mごと）
@@ -2695,7 +2707,8 @@ function buildPlanSVG() {
         '" fill="' + col + '" fill-opacity="0.14" stroke="' + col + '" stroke-width="2"/>');
       if (Math.hypot(dx, dy) > 2)
         E.push('<line x1="' + fmt(cx, 1) + '" y1="' + fmt(cy, 1) + '" x2="' + fmt(ex, 1) + '" y2="' +
-          fmt(ey, 1) + '" stroke="' + col + '" stroke-width="2" marker-end="url(#ah)"/>');
+          fmt(ey, 1) + '" stroke="' + col + '" stroke-width="2"' +
+          (d.measured ? '' : ' stroke-dasharray="5,3"') + ' marker-end="url(#ah)"/>');
       // 文字はまとめて矢印の反対側に積む（実測位置の円と重ならないように）
       const sd = dy > 0 ? -1 : 1;                  // 空いている方向
       const at = k => cy + sd * (r + k) + (sd < 0 ? 0 : 4);
@@ -2713,7 +2726,7 @@ function buildPlanSVG() {
   // 凡例とスケールバー
   const ly = H - 46;
   E.push('<text x="' + pad + '" y="' + ly + '" font-size="12" fill="#666">' +
-    '○点線=設計位置　●=実測位置（' + mag + '倍に誇張）　' +
+    '○点線=設計位置　●=杭位置（' + mag + '倍に誇張）　実線の矢印=根切り後の実測　破線の矢印=地上計測からの推定　' +
     '<tspan fill="#1a7f37">緑=合格</tspan>　<tspan fill="#b42318">赤=要協議</tspan>　' +
     '<tspan fill="#9aa0a6">灰=未計測</tspan>　数字=偏芯mm / 傾斜</text>');
   const barMm = 5000, bx = W - pad - barMm * sc;
@@ -2740,9 +2753,15 @@ function renderPlan() {
   const svg = box.querySelector('svg');
   if (svg) { svg.removeAttribute('width'); svg.removeAttribute('height'); svg.style.width = '100%'; svg.style.height = 'auto'; }
   const ng = D.filter(d => d.ng === true);
+  const dg = D.filter(d => d.measured);
+  const df = dg.filter(d => d.sum.diff);
   sum.innerHTML = '<table class="kv"><tbody>' +
     '<tr><td>設計座標のある杭</td><td>' + D.length + ' / ' + DB.piles.length + '</td></tr>' +
-    '<tr><td>計測済み</td><td>' + D.filter(d => d.ng !== null).length + '</td></tr>' +
+    '<tr><td>地上計測からの推定</td><td>' + D.filter(d => d.ecc && !d.measured).length + '</td></tr>' +
+    '<tr><td>根切り後の実測（出来形）</td><td>' + dg.length + '</td></tr>' +
+    (df.length ? '<tr><td>推定と実測の差（平均）</td><td>' +
+      fmt(df.reduce((a, d) => a + d.sum.diff.mag, 0) / df.length, 0) + ' mm　最大 ' +
+      fmt(Math.max(...df.map(d => d.sum.diff.mag)), 0) + ' mm</td></tr>' : '') +
     '<tr><td>偏芯 要協議</td><td>' + (ng.length
       ? '<span class="badge b-ng">' + ng.length + '</span> ' + ng.map(d => esc(d.p.no)).join(', ')
       : '<span class="badge b-ok">0</span>') + '</td></tr>' +
@@ -2751,10 +2770,27 @@ function renderPlan() {
 
 ['#pl-mag', '#pl-lab'].forEach(id => $(id).addEventListener('change', renderPlan));
 $('#pl-title').addEventListener('input', () => { DB.settings.title = $('#pl-title').value; saveDB(); });
+$('#pl-dxf').addEventListener('click', () => {
+  const t = buildDXF({ mag: parseFloat($('#pl-dxfmag').value) || 1 });
+  if (!t) { toast('設計座標のある杭がありません'); return; }
+  download('杭施工記録_' + new Date().toISOString().slice(0, 10) + '.dxf', t, 'application/dxf');
+});
+
+$('#pl-print').addEventListener('click', () => {
+  const svg = buildPlanSVG();
+  if (!svg) { toast('設計座標のある杭がありません'); return; }
+  const w = window.open('', '_blank');
+  if (!w) { toast('ポップアップがブロックされました'); return; }
+  w.document.write('<!doctype html><meta charset="utf-8"><title>杭 施工記録図</title>' +
+    '<style>@page{size:A3 landscape;margin:8mm}body{margin:0}svg{width:100%;height:auto}</style>' +
+    svg + '<script>window.onload=function(){window.print()}<\/script>');
+  w.document.close();
+});
+
 $('#pl-svg').addEventListener('click', () => {
   const svg = buildPlanSVG();
   if (!svg) { toast('設計座標のある杭がありません'); return; }
-  download('杭出来形図_' + new Date().toISOString().slice(0, 10) + '.svg', svg, 'image/svg+xml');
+  download('杭施工記録図_' + new Date().toISOString().slice(0, 10) + '.svg', svg, 'image/svg+xml');
 });
 
 /* =========================================================
@@ -2790,6 +2826,113 @@ function renderRecords() {
     c.innerHTML = h;
     box.appendChild(c);
   });
+}
+
+/* =========================================================
+   DXF 書き出し（施工記録を杭伏図に重ねる）
+
+   取り込んだ杭伏図と同じ座標系のまま出すので、CAD で開けば
+   元の図にそのまま重なる。同じ台帳から IFC も出るので、
+   図面とモデルが同じ数値を指す。
+
+   CAD は拡大できるので**既定は実寸**。図として見せるための誇張は
+   SVG（印刷用）の側でやる。誇張したいときは倍率を指定できる。
+   ========================================================= */
+
+const DXF_LAYERS = [
+  ['SEKO-設計位置', 8],     // 灰
+  ['SEKO-計測位置', 3],     // 緑
+  ['SEKO-要協議',   1],     // 赤
+  ['SEKO-未計測',   8],
+  ['SEKO-偏芯',     5],     // 青
+  ['SEKO-番号',     7],
+  ['SEKO-数値',     7],
+  ['SEKO-凡例',     7],
+];
+
+function buildDXF(opts) {
+  const o = Object.assign({ mag: 1, textH: 250 }, opts || {});
+  const D = planData();
+  if (!D.length) return null;
+  const L = [];
+  const g = (c, v) => { L.push(String(c)); L.push(String(v)); };
+
+  const circle = (lay, x, y, r) => {
+    g(0, 'CIRCLE'); g(8, lay); g(10, x.toFixed(3)); g(20, y.toFixed(3)); g(30, '0.0'); g(40, r.toFixed(3));
+  };
+  const line = (lay, x1, y1, x2, y2) => {
+    g(0, 'LINE'); g(8, lay); g(10, x1.toFixed(3)); g(20, y1.toFixed(3)); g(30, '0.0');
+    g(11, x2.toFixed(3)); g(21, y2.toFixed(3)); g(31, '0.0');
+  };
+  const text = (lay, x, y, h, t) => {
+    g(0, 'TEXT'); g(8, lay); g(10, x.toFixed(3)); g(20, y.toFixed(3)); g(30, '0.0');
+    g(40, h.toFixed(3)); g(1, t); g(72, 1); g(11, x.toFixed(3)); g(21, y.toFixed(3)); g(31, '0.0');
+  };
+  const arrow = (lay, x1, y1, x2, y2) => {
+    line(lay, x1, y1, x2, y2);
+    const a = Math.atan2(y2 - y1, x2 - x1), s = o.textH * 0.6;
+    [a + 2.6, a - 2.6].forEach(t =>
+      line(lay, x2, y2, x2 + s * Math.cos(t), y2 + s * Math.sin(t)));
+  };
+
+  const xs = D.map(d => d.p.x), ys = D.map(d => d.p.y);
+
+  g(0, 'SECTION'); g(2, 'HEADER');
+  g(9, '$ACADVER'); g(1, 'AC1021');
+  g(9, '$INSUNITS'); g(70, 4);                      // ミリメートル
+  g(9, '$EXTMIN'); g(10, Math.min(...xs) - 2000); g(20, Math.min(...ys) - 2000); g(30, 0);
+  g(9, '$EXTMAX'); g(10, Math.max(...xs) + 2000); g(20, Math.max(...ys) + 2000); g(30, 0);
+  g(0, 'ENDSEC');
+
+  g(0, 'SECTION'); g(2, 'TABLES');
+  g(0, 'TABLE'); g(2, 'LTYPE'); g(70, 1);
+  g(0, 'LTYPE'); g(2, 'CONTINUOUS'); g(70, 0); g(3, 'Solid line'); g(72, 65); g(73, 0); g(40, 0.0);
+  g(0, 'ENDTAB');
+  g(0, 'TABLE'); g(2, 'LAYER'); g(70, DXF_LAYERS.length);
+  DXF_LAYERS.forEach(([n, c]) => {
+    g(0, 'LAYER'); g(2, n); g(70, 0); g(62, c); g(6, 'CONTINUOUS');
+  });
+  g(0, 'ENDTAB'); g(0, 'ENDSEC');
+
+  g(0, 'SECTION'); g(2, 'ENTITIES');
+  D.forEach(d => {
+    const r = (d.p.dia || 400) / 2;
+    const x = d.p.x, y = d.p.y;
+    // 設計位置：円と十字
+    circle('SEKO-設計位置', x, y, r);
+    line('SEKO-設計位置', x - r * 1.3, y, x + r * 1.3, y);
+    line('SEKO-設計位置', x, y - r * 1.3, x, y + r * 1.3);
+    text('SEKO-番号', x, y + r * 1.3 + o.textH * 0.4, o.textH, d.p.no);
+
+    if (!d.ecc) { text('SEKO-未計測', x, y - r * 1.3 - o.textH * 1.2, o.textH * 0.8, '未計測'); return; }
+    const lay = d.ng ? 'SEKO-要協議' : 'SEKO-計測位置';
+    const ex = x + d.ecc.hA * o.mag, ey = y + d.ecc.hB * o.mag;
+    circle(lay, ex, ey, r);
+    if (Math.hypot(ex - x, ey - y) > r * 0.1) arrow('SEKO-偏芯', x, y, ex, ey);
+    const label = fmt(d.ecc.mag, 0) + (d.measured ? '' : '*') +
+      (d.tilt ? '  1/' + fmt(d.tilt.ratio, 0) : '');
+    text('SEKO-数値', x, y - r * 1.3 - o.textH * 1.2, o.textH * 0.8, label);
+  });
+
+  // 凡例（図の左下に置く）
+  const lx = Math.min(...xs) - 1500, ly0 = Math.min(...ys) - 1500;
+  const est = D.filter(d => d.ecc && !d.measured).length;
+  const notes = [
+    '杭 施工記録（出来形ではない）',
+    '数値: 偏芯mm / 傾斜1/n　* は地上計測からの推定（根切り後の実測ではない）',
+    '実測 ' + D.filter(d => d.measured).length + '本 / 推定 ' + est + '本 / 未計測 ' +
+      D.filter(d => !d.ecc).length + '本　偏芯の許容 ' + fmt(D[0].sum.allow, 0) + 'mm',
+    o.mag === 1 ? '偏芯は実寸で描いています' : '偏芯を' + o.mag + '倍に誇張しています',
+    new Date().toLocaleDateString('ja-JP') + ' 作成',
+  ];
+  notes.forEach((t, i) => {
+    g(0, 'TEXT'); g(8, 'SEKO-凡例'); g(10, lx.toFixed(3));
+    g(20, (ly0 - i * o.textH * 1.4).toFixed(3)); g(30, '0.0');
+    g(40, (o.textH * 0.9).toFixed(3)); g(1, t);
+  });
+
+  g(0, 'ENDSEC'); g(0, 'EOF');
+  return L.join('\r\n') + '\r\n';
 }
 
 /* =========================================================
